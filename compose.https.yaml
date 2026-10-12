@@ -1,0 +1,59 @@
+# Optional built-in HTTPS entrypoint, run as the separate "product-hub-https"
+# Compose project by the installer. It reuses the verified Runner image digest
+# (which carries a patched Caddy binary) and reaches the App only over the
+# existing frontend network. PostgreSQL stays on the internal backend network.
+name: product-hub-https
+
+services:
+  https:
+    image: ${PRODUCT_HUB_RUNNER_IMAGE:?verified Runner image digest is required}
+    platform: linux/amd64
+    entrypoint: ["/usr/local/bin/caddy"]
+    command:
+      ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    user: "1001:1001"
+    environment:
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /tmp/caddy-config
+    # Docker sets net.ipv4.ip_unprivileged_port_start=0 in the container
+    # network namespace, so the non-root process binds 80/443 without caps.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - type: bind
+        source: ${PRODUCT_HUB_CADDYFILE:?generated Caddyfile is required}
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: volume
+        source: https_data
+        target: /data/caddy
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    healthcheck:
+      disable: true
+    networks:
+      - frontend
+
+volumes:
+  https_data:
+
+networks:
+  frontend:
+    external: true
+    name: ${PRODUCT_HUB_FRONTEND_NETWORK:?App frontend network is required}

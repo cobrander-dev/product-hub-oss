@@ -1,0 +1,39 @@
+# Explicit future rollout overlay. Never included by normal app deploy.
+services:
+  hard-delete-worker:
+    image: ${HARD_DELETE_WORKER_IMAGE:?Reviewed amd64 worker image is required}
+    platform: linux/amd64
+    profiles: ["operations-hard-delete"]
+    user: "1001:1001"
+    environment:
+      NODE_ENV: production
+      HARD_DELETE_WORKER_DATABASE_URL_FILE: /run/secrets/hard_delete_worker_database_url
+      HARD_DELETE_WORKER_DB_USER: ${HARD_DELETE_WORKER_DB_USER:-product_hub_hard_delete_worker}
+      LOCAL_STORAGE_ROOT: /data/uploads
+      HARD_DELETE_WORKER_ID: production-hard-delete-worker
+      HARD_DELETE_WORKER_POLL_MS: "2000"
+    secrets:
+      - hard_delete_worker_database_url
+    volumes:
+      - product_hub_uploads:/data/uploads
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 512m
+    mem_reservation: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    networks: [product_hub_backend]
+secrets:
+  hard_delete_worker_database_url:
+    file: ${HARD_DELETE_WORKER_DATABASE_URL_SECRET_FILE:?Independent worker secret file is required}

@@ -1,0 +1,23 @@
+# Set APP_DOMAIN in Caddy's environment before loading this file.
+# Caddy manages HTTPS certificates automatically for a valid public domain.
+{$APP_DOMAIN} {
+    encode zstd gzip
+
+    request_body {
+        max_size 12MB
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {http.request.hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {http.request.hostport}
+        header_up -Forwarded
+    }
+}

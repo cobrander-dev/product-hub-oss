@@ -1,0 +1,68 @@
+# Explicit, one-shot operations only. Credentials arrive on stdin, not env/argv.
+services:
+  database-job:
+    image: ${PRODUCT_HUB_MIGRATOR_IMAGE:?Reviewed migrator image is required}
+    platform: linux/amd64
+    profiles: [operations-bootstrap]
+    user: "1000:1000"
+    command:
+      [node, ./node_modules/tsx/dist/cli.mjs, scripts/installer/database-job.ts]
+    environment:
+      NODE_ENV: production
+    stdin_open: true
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 512m
+    networks: [product_hub_backend]
+  admin-bootstrap:
+    image: ${PRODUCT_HUB_MIGRATOR_IMAGE:?Reviewed migrator image is required}
+    platform: linux/amd64
+    profiles: [operations-bootstrap]
+    user: "1000:1000"
+    command: [node, ./node_modules/tsx/dist/cli.mjs, scripts/bootstrap-admin.ts]
+    environment:
+      NODE_ENV: production
+    stdin_open: true
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 512m
+    networks: [product_hub_backend]
+  backup:
+    image: ${PRODUCT_HUB_POSTGRES_IMAGE:?Reviewed PostgreSQL digest is required}
+    profiles: [operations-bootstrap]
+    command: [sh, /operations/backup-entrypoint.sh]
+    environment:
+      LOCAL_STORAGE_ROOT: /data/uploads
+      BACKUP_ROOT: /backups
+      RELEASE_REVISION: ${PRODUCT_HUB_RELEASE_REVISION:?Release revision required for backup}
+    stdin_open: true
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 512m
+    volumes:
+      - product_hub_uploads:/data/uploads:ro
+      - ${PRODUCT_HUB_BACKUP_ROOT:-/opt/product-hub/backups}:/backups
+      - type: bind
+        source: ./scripts/backup.sh
+        target: /operations/backup.sh
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ./scripts/installer/backup-entrypoint.sh
+        target: /operations/backup-entrypoint.sh
+        read_only: true
+        bind: { create_host_path: false }
+    networks: [product_hub_backend]

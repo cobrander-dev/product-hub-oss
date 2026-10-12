@@ -1,0 +1,200 @@
+#!/bin/sh
+set -eu
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || fail ROOT_REQUIRED_RUN_SUDO
+[ "$(uname -s)" = Linux ] || fail LINUX_REQUIRED
+command -v docker >/dev/null 2>&1 || fail DOCKER_REQUIRED
+docker info >/dev/null 2>&1 || fail DOCKER_DAEMON_UNAVAILABLE
+
+install_root=${PRODUCT_HUB_ROOT:-/opt/product-hub}
+current_manifest="$install_root/releases/current.manifest"
+[ -f "$current_manifest" ] || fail CURRENT_RELEASE_MANIFEST_MISSING
+
+manifest_value() {
+  key=$1
+  value=$(awk -F= -v key="$key" '$1 == key { count += 1; value = substr($0, index($0, "=") + 1) } END { if (count == 1) print value }' "$current_manifest")
+  [ -n "$value" ] || fail INVALID_CURRENT_RELEASE_MANIFEST
+  printf '%s\n' "$value"
+}
+migrator=$(manifest_value migrator)
+source_commit=$(manifest_value source_commit)
+release_version=$(manifest_value version)
+printf '%s' "$migrator" | grep -Eq '^ghcr\.io/cobrander-dev/product-hub-oss-migrator@sha256:[0-9a-f]{64}$' || fail INVALID_MIGRATOR_DIGEST
+printf '%s' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' || fail INVALID_SOURCE_COMMIT
+
+command_name=${1:-}
+if [ -z "$command_name" ] && [ -t 0 ] && [ -t 1 ]; then
+  printf '\nProduct Hub %s 管理菜单\n' "$release_version"
+  printf '  1) 运行状态\n  2) 健康检查\n  3) 立即备份\n  4) 检查并更新到最新版本\n  5) 查看应用日志\n  6) HTTPS 证书信息\n  0) 退出\n'
+  printf '请选择: '
+  IFS= read -r choice
+  case "$choice" in
+    1) command_name=status ;;
+    2) command_name=doctor ;;
+    3) command_name=backup ;;
+    4) command_name=upgrade ;;
+    5) command_name=logs ;;
+    6) command_name=https ;;
+    *) exit 0 ;;
+  esac
+  set -- "$command_name"
+fi
+[ -n "$command_name" ] || fail COMMAND_REQUIRED
+shift
+case "$command_name" in
+  status | doctor | backup | update | logs | https | upgrade) ;;
+  *) fail INVALID_COMMAND ;;
+esac
+
+# Host-side certificate view for the optional built-in HTTPS proxy. Reads only
+# public certificate data; never prints keys or configuration secrets.
+if [ "$command_name" = https ]; then
+  access="$install_root/config/access"
+  [ -f "$access" ] || fail ACCESS_CONFIG_MISSING
+  host=$(awk -F= '$1 == "host" { print $2 }' "$access")
+  kind=$(awk -F= '$1 == "kind" { print $2 }' "$access")
+  sni="-servername $host"
+  [ "$kind" != ip ] || sni=-noservername
+  mode=$(awk -F= '$1 == "https" { print $2 }' "$access")
+  if [ "$mode" != builtin ]; then
+    printf '未启用内置 HTTPS：应用监听 127.0.0.1:3000，由你自己的反向代理提供 HTTPS。\n'
+    exit 0
+  fi
+  command -v openssl >/dev/null 2>&1 || fail OPENSSL_REQUIRED
+  wait_seconds=${1:-0}
+  printf '%s' "$wait_seconds" | grep -Eq '^[0-9]{1,3}$' || fail INVALID_WAIT_SECONDS
+  certificate=''
+  while :; do
+    certificate=$(printf '' | openssl s_client -connect 127.0.0.1:443 $sni 2>/dev/null |
+      openssl x509 -noout -issuer -enddate -fingerprint -sha256 2>/dev/null) || certificate=''
+    [ -n "$certificate" ] || [ "$wait_seconds" -le 0 ] || { sleep 5; wait_seconds=$((wait_seconds - 5)); continue; }
+    break
+  done
+  printf '访问地址: https://%s\n' "$host"
+  if [ -z "$certificate" ]; then
+    printf '证书尚未就绪（首次申请可能需要 1-2 分钟）。请确认防火墙已放行 TCP 80/443，稍后运行: product-hub https\n'
+    exit 0
+  fi
+  printf '%s\n' "$certificate"
+  if printf '%s' "$certificate" | grep -q 'Caddy Local Authority'; then
+    container=$(docker ps -q --filter label=com.docker.compose.project=product-hub-https --filter label=com.docker.compose.service=https)
+    [ -n "$container" ] || fail HTTPS_PROXY_NOT_RUNNING
+    root_cert="$install_root/config/https/local-root.crt"
+    docker exec "$container" cat /data/caddy/pki/authorities/local/root.crt >"$root_cert.tmp"
+    openssl x509 -noout -in "$root_cert.tmp" >/dev/null 2>&1 || fail LOCAL_ROOT_CERTIFICATE_INVALID
+    chmod 0644 "$root_cert.tmp"
+    mv "$root_cert.tmp" "$root_cert"
+    printf '\n当前使用自签名证书（自动申请公网证书未成功），浏览器会提示不安全。\n'
+    printf '可将本机根证书导入你的电脑后正常访问；导入前请核对指纹:\n'
+    openssl x509 -noout -fingerprint -sha256 -in "$root_cert"
+    printf '根证书文件: %s\n' "$root_cert"
+  fi
+  exit 0
+fi
+
+# Download the latest (or PRODUCT_HUB_VERSION) release manifest, verify its
+# published checksum, then hand it to the existing guarded update path.
+if [ "$command_name" = upgrade ]; then
+  command -v curl >/dev/null 2>&1 || fail CURL_REQUIRED
+  command -v sha256sum >/dev/null 2>&1 || fail SHA256SUM_REQUIRED
+  repository=cobrander-dev/product-hub-oss
+  if [ -n "${PRODUCT_HUB_VERSION:-}" ]; then
+    printf '%s' "$PRODUCT_HUB_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail INVALID_VERSION
+    base="https://github.com/$repository/releases/download/$PRODUCT_HUB_VERSION"
+  else
+    base="https://github.com/$repository/releases/latest/download"
+  fi
+  download=$(mktemp -d)
+  trap 'rm -rf "$download"' EXIT HUP INT TERM
+  curl -fsSL --proto '=https' --tlsv1.2 "$base/product-hub-release.manifest" -o "$download/product-hub-release.manifest" || fail RELEASE_DOWNLOAD_FAILED
+  curl -fsSL --proto '=https' --tlsv1.2 "$base/product-hub-release.manifest.sha256" -o "$download/product-hub-release.manifest.sha256" || fail RELEASE_DOWNLOAD_FAILED
+  (cd "$download" && sha256sum --check --strict --quiet product-hub-release.manifest.sha256) || fail RELEASE_CHECKSUM_MISMATCH
+  install -o root -g root -m 0644 "$download/product-hub-release.manifest" "$install_root/releases/target.manifest"
+  "$0" update --check || exit 0
+  printf '将先自动备份，再更新。是否继续？[y/N]: '
+  IFS= read -r confirm
+  case "$confirm" in y | Y | yes | YES) ;; *) exit 0 ;; esac
+  exec "$0" update
+fi
+
+runtime_base=/run
+[ -d "$runtime_base" ] && [ -w "$runtime_base" ] || runtime_base=/tmp
+docker_config=$(mktemp -d "$runtime_base/product-hub-docker.XXXXXX")
+restore_tty=''
+cleanup() {
+  if [ -n "$restore_tty" ]; then stty "$restore_tty" </dev/tty 2>/dev/null || true; fi
+  rm -rf "$docker_config"
+}
+trap cleanup EXIT HUP INT TERM
+
+is_check=0
+expect_manifest_path=0
+for argument in "$@"; do
+  if [ "$expect_manifest_path" -eq 1 ]; then
+    case "$argument" in
+      "$install_root"/*) ;;
+      *) fail TARGET_MANIFEST_MUST_BE_UNDER_INSTALL_ROOT ;;
+    esac
+    expect_manifest_path=0
+  elif [ "$argument" = --manifest ]; then
+    expect_manifest_path=1
+  elif [ "$argument" = --check ]; then
+    is_check=1
+  fi
+done
+[ "$expect_manifest_path" -eq 0 ] || fail MISSING_TARGET_MANIFEST
+
+if ! docker image inspect "$migrator" >/dev/null 2>&1; then
+  [ "$command_name" = update ] && [ "$is_check" -eq 0 ] || fail CONTROL_IMAGE_MISSING
+  docker --config "$docker_config" pull --platform linux/amd64 "$migrator" >/dev/null 2>&1 || fail GHCR_AUTH_REQUIRED
+fi
+
+if [ "$command_name" = update ] && [ "$is_check" -eq 0 ] && [ -t 0 ]; then
+  printf 'GHCR username (leave empty for public packages): ' >/dev/tty
+  IFS= read -r ghcr_username </dev/tty
+  if [ -n "$ghcr_username" ]; then
+    printf 'GHCR read token: ' >/dev/tty
+    restore_tty=$(stty -g </dev/tty)
+    stty -echo </dev/tty
+    IFS= read -r ghcr_token </dev/tty
+    stty "$restore_tty" </dev/tty
+    restore_tty=''
+    printf '\n' >/dev/tty
+    [ -n "$ghcr_token" ] || fail GHCR_TOKEN_REQUIRED
+    printf '%s' "$ghcr_token" | docker --config "$docker_config" login ghcr.io --username "$ghcr_username" --password-stdin >/dev/null
+    unset ghcr_token
+  fi
+fi
+
+repository_root="$install_root/releases/$source_commit/bundle"
+image_identity=$(docker image inspect --format '{{.Os}}/{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.version"}}' "$migrator")
+[ "$image_identity" = "linux/amd64 $source_commit $release_version" ] || fail CONTROL_IMAGE_IDENTITY_MISMATCH
+[ -d "$repository_root" ] || fail RELEASE_BUNDLE_MISSING
+tty_flag=-i
+if [ -t 0 ] && [ -t 1 ]; then tty_flag=-it; fi
+docker run --rm "$tty_flag" \
+  --user 0:0 \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1777 \
+  --tmpfs /run:size=16m,mode=0700 \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_READ_SEARCH \
+  --security-opt no-new-privileges:true \
+  --network none \
+  --pids-limit 256 \
+  --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+  --mount type=bind,source="$install_root",target="$install_root" \
+  --mount type=bind,source="$docker_config",target=/root/.docker,readonly \
+  --env HOME=/root \
+  --env DOCKER_CONFIG=/root/.docker \
+  --env PRODUCT_HUB_ROOT="$install_root" \
+  --env PRODUCT_HUB_CONTROL_CONTAINER=1 \
+  --env PRODUCT_HUB_REPOSITORY_ROOT="$repository_root" \
+  --env PRODUCT_HUB_RELEASE_REVISION="$source_commit" \
+  "$migrator" \
+  node /app/node_modules/tsx/dist/cli.mjs /app/scripts/installer/operator-cli.ts "$command_name" "$@"

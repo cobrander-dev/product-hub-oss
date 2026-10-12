@@ -1,0 +1,472 @@
+name: Publish immutable production images
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification build or promotion of verified digests
+        required: true
+        type: choice
+        options: [verification, release]
+        default: verification
+      source_commit:
+        description: Full reviewed IMAGE SOURCE commit SHA, never a branch
+        required: true
+        type: string
+      version:
+        description: Release mode only, approved SemVer; empty for verification
+        required: false
+        type: string
+      verification_run_id:
+        description: Release mode only, successful signed verification run
+        required: false
+        type: string
+      confirmation:
+        description: Type PUBLISH_IMMUTABLE_IMAGES
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: product-hub-release-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  # CI/browser outputs and --load fixture images must never accumulate on the
+  # runner that stages the final OCI archives and their SBOMs.
+  source-verification:
+    runs-on: ubuntu-24.04
+    environment: ghcr-release
+    permissions:
+      contents: read
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      DISTRIBUTION_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Validate source input before checkout
+        run: |
+          set -eu
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$DISTRIBUTION_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+
+      - name: Check out immutable release tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check out exact image source separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          path: source
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+          cache: pnpm
+          cache-dependency-path: tooling/pnpm-lock.yaml
+
+      - name: Install pinned tooling dependencies and run distribution tests
+        working-directory: tooling
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test:distribution
+
+      - name: Validate mode and both checkout revisions
+        id: identity
+        env:
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          VERIFICATION_RUN: ${{ inputs.verification_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/workflow-identity.ts
+
+      - name: Reclaim unused preinstalled Android SDK on hosted Source Verification runner
+        if: inputs.mode == 'verification'
+        env:
+          RELEASE_MODE: ${{ inputs.mode }}
+        run: node tooling/.github/scripts/reclaim-publish-disk.mjs
+
+      - name: Install source dependencies
+        if: inputs.mode == 'verification'
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: Record source verification disk baseline
+        run: bash tooling/.github/scripts/release-disk-check.sh source-baseline 0
+
+      - name: Prepare isolated test database and random test credentials
+        if: inputs.mode == 'verification'
+        working-directory: source
+        run: node ../tooling/scripts/release/ci-environment.mjs prepare
+
+      - name: Prepare Prisma and test browsers
+        if: inputs.mode == 'verification'
+        working-directory: source
+        run: |
+          pnpm prisma:generate
+          pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Full source repository verification
+        if: inputs.mode == 'verification'
+        working-directory: source
+        run: |
+          pnpm ci:check
+          pnpm audit --prod --audit-level high
+
+      - name: Build local amd64 fixtures and verify both domains
+        if: inputs.mode == 'verification'
+        working-directory: source
+        env:
+          PRODUCT_HUB_DOMAIN_TEST_TAG: ci-${{ inputs.source_commit }}
+        run: |
+          bash ../tooling/.github/scripts/release-disk-check.sh before-fixtures 8192
+          pnpm release:build:amd64 "$PRODUCT_HUB_DOMAIN_TEST_TAG"
+          pnpm test:domain-neutral-release
+
+      - name: Sanitize failed browser evidence before credential cleanup
+        id: failure_diagnostics
+        if: failure() && inputs.mode == 'verification'
+        run: node tooling/node_modules/tsx/dist/cli.mjs tooling/tests/support/safe-artifacts.ts source "${{ runner.temp }}/product-hub-safe-test-failure"
+
+      - name: Upload sanitized failure evidence only
+        if: failure() && steps.failure_diagnostics.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/product-hub-safe-test-failure
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove isolated test credentials and database
+        if: always() && inputs.mode == 'verification'
+        working-directory: source
+        run: node ../tooling/scripts/release/ci-environment.mjs cleanup
+
+      - name: Repository secret scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          skip-dirs: source/node_modules,source/.next,source/test-results,tooling/node_modules
+          exit-code: "1"
+
+      - name: Record source verification final disk usage
+        if: always()
+        run: bash tooling/.github/scripts/release-disk-check.sh source-final 0
+
+  publish:
+    # A failed/cancelled prerequisite must block all OCI and registry operations.
+    # Do not use always() here. Release promotion still passes identity/secret gates.
+    needs: source-verification
+    runs-on: ubuntu-24.04
+    environment: ghcr-release
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      DISTRIBUTION_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Check out immutable release tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Check out exact image source separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          path: source
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+
+      - name: Install pinned release tooling only
+        working-directory: tooling
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate mode and both fresh checkout revisions
+        id: identity
+        env:
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          VERIFICATION_RUN: ${{ inputs.verification_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/workflow-identity.ts
+
+      - name: Reclaim unused preinstalled Android SDK on hosted Publish runner
+        if: inputs.mode == 'verification'
+        env:
+          RELEASE_MODE: ${{ inputs.mode }}
+        run: node tooling/.github/scripts/reclaim-publish-disk.mjs
+
+      - name: Record fresh OCI runner disk baseline
+        run: bash tooling/.github/scripts/release-disk-check.sh oci-baseline 12288
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Prepare OCI transfer tools and verify source again
+        run: |
+          set -eu
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git -C source diff --exit-code HEAD
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          ARTIFACT_DIR="$RUNNER_TEMP/product-hub-release"
+          mkdir -m 0700 "$ARTIFACT_DIR"
+          printf 'ARTIFACT_DIR=%s\n' "$ARTIFACT_DIR" >> "$GITHUB_ENV"
+
+      # Conservative free-space stop floors, not measured peak-space guarantees.
+      # Keep all three archives and the shared builder until scans/push finish.
+      - name: Check space before Runner OCI and SBOM
+        if: inputs.mode == 'verification'
+        run: bash tooling/.github/scripts/release-disk-check.sh before-runner 12288
+
+      - name: Stage Runner OCI archive without publishing
+        if: inputs.mode == 'verification'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./source
+          target: runner
+          platforms: linux/amd64
+          push: false
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            SOURCE_COMMIT=${{ inputs.source_commit }}
+            RELEASE_VERSION=${{ steps.identity.outputs.version }}
+          outputs: type=oci,dest=${{ runner.temp }}/product-hub-release/runner.tar
+
+      - name: Check space after Runner and before Migrator OCI
+        if: inputs.mode == 'verification'
+        run: bash tooling/.github/scripts/release-disk-check.sh before-migrator 8192
+
+      - name: Stage Migrator OCI archive without publishing
+        if: inputs.mode == 'verification'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./source
+          target: migrator
+          platforms: linux/amd64
+          push: false
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            SOURCE_COMMIT=${{ inputs.source_commit }}
+            RELEASE_VERSION=${{ steps.identity.outputs.version }}
+          outputs: type=oci,dest=${{ runner.temp }}/product-hub-release/migrator.tar
+
+      - name: Check space after Migrator and before Worker OCI
+        if: inputs.mode == 'verification'
+        run: bash tooling/.github/scripts/release-disk-check.sh before-worker 6144
+
+      - name: Stage Worker OCI archive without publishing
+        if: inputs.mode == 'verification'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./source
+          target: hard-delete-worker
+          platforms: linux/amd64
+          push: false
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            SOURCE_COMMIT=${{ inputs.source_commit }}
+            RELEASE_VERSION=${{ steps.identity.outputs.version }}
+          outputs: type=oci,dest=${{ runner.temp }}/product-hub-release/worker.tar
+
+      - name: Check space after Worker and before archive scans
+        if: inputs.mode == 'verification'
+        run: bash tooling/.github/scripts/release-disk-check.sh before-scan 4096
+
+      - name: Scan ALL actual archives before ANY push
+        if: inputs.mode == 'verification'
+        run: node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/staged-images.ts scan "$ARTIFACT_DIR" "$SOURCE_COMMIT"
+
+      - name: Upload complete unfiltered image scan reports
+        if: always() && inputs.mode == 'verification'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-scan-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/product-hub-release/scan-reports
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Authenticate to GHCR for this job only
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push scanned bytes or promote already verified digests
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          VERIFICATION_RUN: ${{ inputs.verification_run_id }}
+        run: |
+          set -eu
+          export REGISTRY_AUTH_FILE="$HOME/.docker/config.json"
+          if [ "$RELEASE_MODE" = verification ]; then
+            node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/staged-images.ts publish "$ARTIFACT_DIR" "$SOURCE_COMMIT"
+          else
+            node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/promotion.ts "$ARTIFACT_DIR" "$SOURCE_COMMIT" "$RELEASE_VERSION" "$VERIFICATION_RUN"
+          fi
+
+      - name: Attest Runner provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-name: ghcr.io/cobrander-dev/product-hub-oss-app
+          subject-digest: ${{ steps.publish.outputs.runner }}
+          push-to-registry: true
+
+      - name: Attest Migrator provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-name: ghcr.io/cobrander-dev/product-hub-oss-migrator
+          subject-digest: ${{ steps.publish.outputs.migrator }}
+          push-to-registry: true
+
+      - name: Attest Worker provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-name: ghcr.io/cobrander-dev/product-hub-oss-hard-delete-worker
+          subject-digest: ${{ steps.publish.outputs.worker }}
+          push-to-registry: true
+
+      - name: Create manifest and checksum only after image attestations succeed
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          RUNNER_IMAGE: ghcr.io/cobrander-dev/product-hub-oss-app@${{ steps.publish.outputs.runner }}
+          MIGRATOR_IMAGE: ghcr.io/cobrander-dev/product-hub-oss-migrator@${{ steps.publish.outputs.migrator }}
+          WORKER_IMAGE: ghcr.io/cobrander-dev/product-hub-oss-hard-delete-worker@${{ steps.publish.outputs.worker }}
+          WORKFLOW_RUN: ${{ github.run_id }}
+        run: |
+          set -eu
+          POSTGRES_IMAGE=$(tr -d '\n' < source/deploy/releases/postgres-linux-amd64.txt)
+          export POSTGRES_IMAGE
+          PUBLISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          export PUBLISHED_AT
+          node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/create-manifest.ts "$ARTIFACT_DIR/product-hub-release.manifest"
+          node tooling/node_modules/tsx/dist/cli.mjs tooling/scripts/release/verify-manifest.ts --pull --checksum "$ARTIFACT_DIR/product-hub-release.manifest"
+
+      - name: Sign manifest for future digest-only promotion
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ runner.temp }}/product-hub-release/product-hub-release.manifest
+
+      - name: Upload checked manifest and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: product-hub-${{ inputs.mode }}-${{ inputs.source_commit }}
+          path: |
+            ${{ runner.temp }}/product-hub-release/product-hub-release.manifest
+            ${{ runner.temp }}/product-hub-release/product-hub-release.manifest.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record OCI runner final disk usage even on failure
+        if: always()
+        run: bash tooling/.github/scripts/release-disk-check.sh oci-final 0
+
+  # Formal SemVer only: package the reviewed installer files from the exact
+  # source commit together with the signed release manifest, attest them, and
+  # create a DRAFT GitHub Release. A maintainer publishes the draft manually.
+  github-release:
+    needs: publish
+    if: inputs.mode == 'release'
+    runs-on: ubuntu-24.04
+    environment: ghcr-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          path: source
+          persist-credentials: false
+
+      - name: Download the signed release manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-hub-release-${{ inputs.source_commit }}
+          path: manifest
+
+      - name: Assemble installer bundle and checksums
+        run: |
+          set -eu
+          printf '%s' "$RELEASE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          stage="$RUNNER_TEMP/installer"
+          out="$RUNNER_TEMP/release-assets"
+          mkdir -p "$stage/scripts" "$out"
+          cp manifest/product-hub-release.manifest manifest/product-hub-release.manifest.sha256 "$stage/"
+          (cd "$stage" && sha256sum --check --strict product-hub-release.manifest.sha256)
+          grep -qx "version=$RELEASE_VERSION" "$stage/product-hub-release.manifest"
+          grep -qx "source_commit=$SOURCE_COMMIT" "$stage/product-hub-release.manifest"
+          install -m 0755 source/setup.sh "$stage/setup.sh"
+          install -m 0755 source/scripts/product-hub "$stage/scripts/product-hub"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
+            -czf "$out/product-hub-installer.tar.gz" -C "$stage" .
+          install -m 0755 source/install.sh "$out/install.sh"
+          cp "$stage/product-hub-release.manifest" "$stage/product-hub-release.manifest.sha256" "$out/"
+          (cd "$out" && sha256sum product-hub-installer.tar.gz install.sh product-hub-release.manifest > SHA256SUMS)
+          echo "ASSET_DIR=$out" >> "$GITHUB_ENV"
+
+      - name: Attest installer assets
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release-assets/product-hub-installer.tar.gz
+            ${{ runner.temp }}/release-assets/install.sh
+
+      - name: Create draft GitHub Release (publish manually after review)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          一键安装（Ubuntu 24.04 x86_64，需 root）:
+
+              bash <(curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_VERSION/install.sh)
+
+          镜像固定 digest 见 product-hub-release.manifest；校验和见 SHA256SUMS。
+          NOTES
+          gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft \
+            --target "$SOURCE_COMMIT" --title "Product Hub $RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "$ASSET_DIR/product-hub-installer.tar.gz" "$ASSET_DIR/install.sh" \
+            "$ASSET_DIR/product-hub-release.manifest" "$ASSET_DIR/product-hub-release.manifest.sha256" \
+            "$ASSET_DIR/SHA256SUMS"

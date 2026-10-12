@@ -1,0 +1,20 @@
+# DO NOT EDIT — GENERATED from a verified Product Hub release manifest.
+# Generic image-only override; never put credentials in this file.
+x-product-hub-release:
+  schema: "product-hub-release/v1"
+  version: {{VERSION}}
+  source-commit: {{SOURCE_COMMIT}}
+  distribution-commit: {{DISTRIBUTION_COMMIT}}
+  platform: "linux/amd64"
+  worker-image: {{WORKER_IMAGE}}
+  postgres-image: {{POSTGRES_IMAGE}}
+
+services:
+  app:
+    image: {{RUNNER_IMAGE}}
+    build: !reset null
+  migration:
+    image: {{MIGRATOR_IMAGE}}
+    build: !reset null
+  postgres:
+    image: {{POSTGRES_IMAGE}}

@@ -1,0 +1,58 @@
+# dependencies and build output
+node_modules/
+.next/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+src/generated/prisma/
+
+# local configuration and secrets
+.env*
+!.env.example
+!.env.production.example
+/config/
+/secrets/
+*.secret
+*.credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# local data, uploads, databases and backups
+data/
+uploads/
+backups/
+backup-archives/
+*.sql
+!prisma/migrations/**/*.sql
+!docker/postgres/**/*.sql
+*.db
+*.sqlite
+*.dump
+*.backup
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# deployment-generated files
+compose.release*.yaml
+product-hub.resolved.env
+/runtime-config/
+/generated-runtime-config/
+
+# logs and editor files
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# generated temporary files
+tmp/
+.cache/
+*.tsbuildinfo

@@ -104,7 +104,7 @@ public_ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
 printf '%s' "$public_ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || public_ip=''
 
 if [ -n "${PRODUCT_HUB_VERSION:-}" ]; then
-  printf '%s' "$PRODUCT_HUB_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail INVALID_VERSION
+  printf '%s' "$PRODUCT_HUB_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' || fail INVALID_VERSION
   base="https://github.com/$repository/releases/download/$PRODUCT_HUB_VERSION"
 else
   base="https://github.com/$repository/releases/latest/download"

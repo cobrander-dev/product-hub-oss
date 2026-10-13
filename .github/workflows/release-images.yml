@@ -428,7 +428,7 @@ jobs:
       - name: Assemble installer bundle and checksums
         run: |
           set -eu
-          printf '%s' "$RELEASE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          printf '%s' "$RELEASE_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           stage="$RUNNER_TEMP/installer"
           out="$RUNNER_TEMP/release-assets"
           mkdir -p "$stage/scripts" "$out"
@@ -464,7 +464,16 @@ jobs:
 
           镜像固定 digest 见 product-hub-release.manifest；校验和见 SHA256SUMS。
           NOTES
-          gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft \
+          # Never reuse a version: an existing release or draft stops here.
+          if gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_VERSION already exists"
+            exit 1
+          fi
+          # SemVer pre-releases (e.g. v0.9.0-rc.1) are marked pre-release so
+          # they can never become the "latest" stable download.
+          prerelease=''
+          case "$RELEASE_VERSION" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft $prerelease \
             --target "$SOURCE_COMMIT" --title "Product Hub $RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             "$ASSET_DIR/product-hub-installer.tar.gz" "$ASSET_DIR/install.sh" \

@@ -200,3 +200,80 @@ for (const failure of ["failed-run", "wrong-tooling", "unsigned-manifest"])
       rmSync(root, { recursive: true });
     }
   });
+
+for (const scenario of ["tag-exists", "tag-lookup-fails", "tag-free"] as const)
+  test(`promotion tag guard: ${scenario}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "product-hub-promotion-tag-"));
+    try {
+      const bin = join(root, "bin");
+      const previous = join(root, "previous");
+      mkdirSync(bin);
+      mkdirSync(previous);
+      const path = join(previous, "product-hub-release.manifest");
+      const contents = fixture();
+      writeFileSync(path, contents);
+      writeFileSync(
+        `${path}.sha256`,
+        `${createHash("sha256").update(contents).digest("hex")}  product-hub-release.manifest\n`,
+      );
+      const pin = join(root, "postgres.txt");
+      writeFileSync(pin, `postgres@sha256:${"4".repeat(64)}\n`);
+      const log = join(root, "events");
+      writeFileSync(log, "");
+      const common = `#!/usr/bin/env node\nconst fs=require('node:fs');const a=process.argv.slice(2);fs.appendFileSync(process.env.GATE_LOG,require('node:path').basename(process.argv[1])+' '+a.join(' ')+'\\n');\n`;
+      // Signed verification run and attestations all succeed.
+      writeFileSync(
+        join(bin, "gh"),
+        common +
+          `if(a[0]==='api')process.stdout.write(JSON.stringify({conclusion:'success',status:'completed',event:'workflow_dispatch',path:'.github/workflows/release-images.yml',head_sha:'a'.repeat(40)}));`,
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(bin, "skopeo"),
+        common +
+          `if(a[0]==='list-tags'){if(process.env.SCENARIO==='tag-lookup-fails')process.exit(1);process.stdout.write(JSON.stringify({Tags:['sha-x',...(process.env.SCENARIO==='tag-exists'&&a[1].endsWith('-migrator')?['v1.0.0']:[])]}));process.exit(0);}process.exit(1);`,
+        { mode: 0o755 },
+      );
+      writeFileSync(join(bin, "docker"), common + "process.exit(1);", {
+        mode: 0o755,
+      });
+      const result = spawnSync(
+        process.execPath,
+        [
+          resolve("node_modules/tsx/dist/cli.mjs"),
+          resolve("scripts/release/promotion.ts"),
+          root,
+          source,
+          "v1.0.0",
+          "42",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            NODE_ENV: "test",
+            GATE_LOG: log,
+            SCENARIO: scenario,
+            POSTGRES_PIN_FILE: pin,
+          },
+        },
+      );
+      const events = readFileSync(log, "utf8");
+      // The fake copy always fails, so every scenario exits non-zero; what
+      // matters is whether any image transfer was attempted.
+      assert.equal(result.status, 1);
+      if (scenario === "tag-free") {
+        assert.equal((events.match(/skopeo list-tags/g) || []).length, 3);
+        assert.match(
+          events,
+          /skopeo copy --all --preserve-digests docker:\/\//,
+        );
+      } else {
+        assert.doesNotMatch(events, /skopeo copy|docker /);
+        if (scenario === "tag-exists")
+          assert.match(result.stderr, /RELEASE_TAG_ALREADY_EXISTS/);
+      }
+    } finally {
+      rmSync(root, { recursive: true });
+    }
+  });

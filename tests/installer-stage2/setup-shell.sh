@@ -148,4 +148,56 @@ for command in status doctor; do
   grep -F "operator-cli.ts $command" "$test_root/verification.log" >/dev/null
 done
 
-echo 'PASS: setup and CLI verification contract, shell preflight, existing-install stop, image identity rejection, and control-container hardening'
+# A formal SemVer manifest promotes the unchanged images verified for the SAME
+# full source commit, so their version label stays verification-<commit>.
+promoted="linux/amd64 1111111111111111111111111111111111111111 $verification"
+: >"$test_root/promoted.log"
+PRODUCT_HUB_ROOT="$test_root/promoted-root" \
+PRODUCT_HUB_CLI_PATH="$test_root/promoted-cli" \
+PRODUCT_HUB_RELEASE_MANIFEST="$manifest" \
+FAKE_IMAGE_IDENTITY="$promoted" \
+FAKE_DOCKER_LOG="$test_root/promoted.log" PATH="$bin:$PATH" \
+  sh "$project_dir/setup.sh" >"$test_root/promoted.out"
+grep -F 'operator-cli.ts setup' "$test_root/promoted.log" >/dev/null
+mkdir -p "$test_root/promoted-root/releases/1111111111111111111111111111111111111111/bundle"
+cp "$manifest" "$test_root/promoted-root/releases/current.manifest"
+PRODUCT_HUB_ROOT="$test_root/promoted-root" \
+FAKE_IMAGE_IDENTITY="$promoted" \
+FAKE_DOCKER_LOG="$test_root/promoted.log" PATH="$bin:$PATH" \
+  sh "$project_dir/scripts/product-hub" status
+grep -F 'operator-cli.ts status' "$test_root/promoted.log" >/dev/null
+
+# Promotion never relaxes architecture, commit or version binding.
+for case in \
+  "$manifest|linux/amd64 1111111111111111111111111111111111111111 verification-2222222222222222222222222222222222222222" \
+  "$manifest|linux/amd64 2222222222222222222222222222222222222222 verification-1111111111111111111111111111111111111111" \
+  "$manifest|linux/arm64 1111111111111111111111111111111111111111 verification-1111111111111111111111111111111111111111" \
+  "$manifest|linux/amd64 1111111111111111111111111111111111111111 verification-111111111111111111111111111111111111111" \
+  "$manifest|linux/amd64 1111111111111111111111111111111111111111 sha-1111111111111111111111111111111111111111" \
+  "$verification_manifest|linux/amd64 1111111111111111111111111111111111111111 v1.0.0-rc.1" \
+  "$verification_manifest|linux/amd64 1111111111111111111111111111111111111111 verification-2222222222222222222222222222222222222222"; do
+  case_manifest=${case%%|*}
+  case_identity=${case#*|}
+  : >"$test_root/promotion-reject.log"
+  if PRODUCT_HUB_ROOT="$test_root/promotion-reject-root" \
+    PRODUCT_HUB_CLI_PATH="$test_root/promotion-reject-cli" \
+    PRODUCT_HUB_RELEASE_MANIFEST="$case_manifest" \
+    FAKE_IMAGE_IDENTITY="$case_identity" \
+    FAKE_DOCKER_LOG="$test_root/promotion-reject.log" PATH="$bin:$PATH" \
+    sh "$project_dir/setup.sh" >/dev/null 2>&1; then
+    echo "setup accepted mismatched identity: $case_identity" >&2
+    exit 1
+  fi
+  [ ! -e "$test_root/promotion-reject-root" ]
+  ! grep -E '(^| )run ' "$test_root/promotion-reject.log" >/dev/null
+  if PRODUCT_HUB_ROOT="$test_root/promoted-root" \
+    FAKE_IMAGE_IDENTITY="$case_identity" \
+    FAKE_DOCKER_LOG="$test_root/promotion-reject.log" PATH="$bin:$PATH" \
+    sh "$project_dir/scripts/product-hub" status >/dev/null 2>&1 &&
+    [ "$case_manifest" = "$manifest" ]; then
+    echo "CLI accepted mismatched identity: $case_identity" >&2
+    exit 1
+  fi
+done
+
+echo 'PASS: setup and CLI verification contract, formal-release promotion identity, shell preflight, existing-install stop, image identity rejection, and control-container hardening'

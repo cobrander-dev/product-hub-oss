@@ -80,6 +80,22 @@ export function promote(
   ).trim();
   if (postgres !== manifest.images.postgres)
     throw new ReleaseManifestFailure("POSTGRES_DIGEST_CHANGED");
+  // Published SemVer tags are immutable: never re-point an existing tag. A
+  // failed tag lookup also stops before any transfer (fail closed).
+  for (const name of Object.keys(products) as (keyof typeof products)[]) {
+    const { Tags } = z
+      .object({ Tags: z.array(z.string()) })
+      .parse(
+        JSON.parse(
+          run("skopeo", [
+            "list-tags",
+            `docker://ghcr.io/cobrander-dev/${products[name]}`,
+          ]),
+        ),
+      );
+    if (Tags.includes(identity.tag))
+      throw new ReleaseManifestFailure("RELEASE_TAG_ALREADY_EXISTS");
+  }
   for (const name of Object.keys(products) as (keyof typeof products)[]) {
     const reference = manifest.images[name];
     run("gh", ["attestation", "verify", `oci://${reference}`, ...policy]);

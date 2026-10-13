@@ -47,3 +47,27 @@ test("existing installs open the menu instead of being overwritten", () => {
   assert.ok(existing > 0 && download > existing);
   assert.match(script, /exec "\$cli_path" <\/dev\/tty/);
 });
+
+test("install.sh and product-hub accept SemVer pre-releases but reject other versions", () => {
+  const cli = readFileSync("scripts/product-hub", "utf8");
+  for (const source of [script, cli]) {
+    const pattern = /grep -Eq '(\^v[^']+)' \|\| fail INVALID_VERSION/.exec(
+      source,
+    )?.[1];
+    assert.ok(pattern);
+    const accepts = (value: string) =>
+      spawnSync("grep", ["-Eq", pattern], { input: value }).status === 0;
+    for (const value of ["v0.9.0", "v0.9.0-rc.1", "v1.0.0", "v10.2.3-beta.2"])
+      assert.ok(accepts(value), value);
+    for (const value of [
+      "0.9.0",
+      "v0.9",
+      "v01.0.0",
+      "v1.0.0+build",
+      "latest",
+      "v1.0.0-",
+      "v1.0.0-rc.1;id",
+    ])
+      assert.ok(!accepts(value), value);
+  }
+});

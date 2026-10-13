@@ -104,7 +104,7 @@ if [ "$command_name" = upgrade ]; then
   command -v sha256sum >/dev/null 2>&1 || fail SHA256SUM_REQUIRED
   repository=cobrander-dev/product-hub-oss
   if [ -n "${PRODUCT_HUB_VERSION:-}" ]; then
-    printf '%s' "$PRODUCT_HUB_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail INVALID_VERSION
+    printf '%s' "$PRODUCT_HUB_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' || fail INVALID_VERSION
     base="https://github.com/$repository/releases/download/$PRODUCT_HUB_VERSION"
   else
     base="https://github.com/$repository/releases/latest/download"
@@ -173,7 +173,15 @@ fi
 
 repository_root="$install_root/releases/$source_commit/bundle"
 image_identity=$(docker image inspect --format '{{.Os}}/{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.version"}}' "$migrator")
-[ "$image_identity" = "linux/amd64 $source_commit $release_version" ] || fail CONTROL_IMAGE_IDENTITY_MISMATCH
+# Exact match, or a formal SemVer manifest promoting the unchanged images that
+# were built and verified for the same full source commit (verifyImageLabels).
+identity_ok=0
+[ "$image_identity" = "linux/amd64 $source_commit $release_version" ] && identity_ok=1
+if printf '%s' "$release_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' &&
+  [ "$image_identity" = "linux/amd64 $source_commit verification-$source_commit" ]; then
+  identity_ok=1
+fi
+[ "$identity_ok" -eq 1 ] || fail CONTROL_IMAGE_IDENTITY_MISMATCH
 [ -d "$repository_root" ] || fail RELEASE_BUNDLE_MISSING
 tty_flag=-i
 if [ -t 0 ] && [ -t 1 ]; then tty_flag=-it; fi

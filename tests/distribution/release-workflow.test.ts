@@ -216,3 +216,16 @@ test("formal release only creates an attested DRAFT GitHub Release", () => {
   const before = workflow.slice(0, workflow.indexOf("  github-release:"));
   assert.doesNotMatch(before, /contents: write/);
 });
+
+test("release job refuses an existing version and keeps pre-releases off latest", () => {
+  const job = workflow.slice(workflow.indexOf("  github-release:"));
+  const guard = job.indexOf('gh release view "$RELEASE_VERSION"');
+  const create = job.indexOf('gh release create "$RELEASE_VERSION"');
+  assert.ok(guard > 0 && create > guard);
+  assert.match(job, /already exists"\n\s+exit 1/);
+  assert.match(
+    job,
+    /case "\$RELEASE_VERSION" in \*-\*\) prerelease=--prerelease ;; esac/,
+  );
+  assert.match(job, /--draft \$prerelease/);
+});

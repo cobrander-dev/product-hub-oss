@@ -97,7 +97,15 @@ if ! docker --config "$docker_config" pull --platform linux/amd64 "$migrator" >/
 fi
 
 image_identity=$(docker image inspect --format '{{.Os}}/{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.version"}}' "$migrator")
-[ "$image_identity" = "linux/amd64 $source_commit $release_version" ] || fail CONTROL_IMAGE_IDENTITY_MISMATCH
+# Exact match, or a formal SemVer manifest promoting the unchanged images that
+# were built and verified for the same full source commit (verifyImageLabels).
+identity_ok=0
+[ "$image_identity" = "linux/amd64 $source_commit $release_version" ] && identity_ok=1
+if printf '%s' "$release_version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' &&
+  [ "$image_identity" = "linux/amd64 $source_commit verification-$source_commit" ]; then
+  identity_ok=1
+fi
+[ "$identity_ok" -eq 1 ] || fail CONTROL_IMAGE_IDENTITY_MISMATCH
 
 printf 'Recommended/acceptance host profile: 4 vCPU, 8 GiB RAM, 80 GiB disk. This is not yet a declared minimum.\n'
 install -d -o root -g root -m 0700 "$install_root"

@@ -458,9 +458,9 @@ jobs:
         run: |
           set -eu
           cat > "$RUNNER_TEMP/notes.md" <<NOTES
-          一键安装（Ubuntu 24.04 x86_64，需 root）:
+          一键安装（Ubuntu 24.04 x86_64，root 或 sudo 用户）:
 
-              bash <(curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_VERSION/install.sh)
+              curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_VERSION/install.sh -o install.sh && PRODUCT_HUB_VERSION=$RELEASE_VERSION bash install.sh
 
           镜像固定 digest 见 product-hub-release.manifest；校验和见 SHA256SUMS。
           NOTES

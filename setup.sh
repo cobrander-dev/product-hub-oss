@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+step() { printf '\n[%s/5] %s\n' "$1" "$2"; }
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   [ -z "${2:-}" ] || printf '%s\n' "$2" >&2
@@ -78,6 +79,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+step 3 '正在下载镜像（首次安装可能需要几分钟）'
 if ! docker --config "$docker_config" pull --platform linux/amd64 "$migrator" >/dev/null 2>&1; then
   [ -t 0 ] || fail GHCR_AUTH_REQUIRED
   printf 'GHCR username: ' >/dev/tty
@@ -141,13 +143,18 @@ run_control() {
     node /app/node_modules/tsx/dist/cli.mjs /app/scripts/installer/operator-cli.ts setup --manifest /release.manifest
 }
 
+step 4 '正在配置服务'
 run_control
 install -o root -g root -m 0755 "$script_dir/scripts/product-hub" "$cli_path"
 printf 'PASS: Product Hub installed.\n'
+step 5 '安装成功'
+access_host=$(awk -F= '$1 == "host" { print $2 }' "$install_root/config/access" 2>/dev/null) || access_host=''
 if grep -qx 'https=builtin' "$install_root/config/access" 2>/dev/null; then
+  printf '访问地址：https://%s\n' "$access_host"
   printf '\n正在等待 HTTPS 证书（最长约 2 分钟）...\n'
   "$cli_path" https 120 || true
 else
+  printf '应用监听 127.0.0.1:3000，访问域名：%s（由你自己的反向代理提供 HTTPS）。\n' "$access_host"
   printf '反向代理示例已生成在 %s/proxy，未自动应用。\n' "$install_root"
 fi
 printf '\n管理命令: sudo product-hub（菜单） | status | doctor | backup | upgrade | logs | https\n'

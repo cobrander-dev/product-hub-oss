@@ -2,15 +2,15 @@
 
 ## 支持的主机
 
-全新的 Ubuntu 24.04 `x86_64`（`linux/amd64`）服务器，root 权限。Ubuntu 22.04、Debian 12/13 可以安装但未经正式验证。推荐 4 vCPU、8 GiB 内存、80 GiB 磁盘。主机不需要 Node.js 或 pnpm。
+全新的 Ubuntu 24.04 `x86_64`（`linux/amd64`）服务器，root 或 sudo 权限。Ubuntu 22.04 / 26.04、Debian 12/13 可以安装但未经正式验证。推荐 4 vCPU、8 GiB 内存、80 GiB 磁盘。主机不需要 Node.js 或 pnpm。
 
 ## 一键安装
 
 ```bash
-bash <(curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh)
+curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh -o install.sh && bash install.sh
 ```
 
-也可以使用 `curl -fsSL <同一地址> | sudo sh`；交互输入始终从终端读取。指定版本时在命令前加 `PRODUCT_HUB_VERSION=v1.0.0`。
+`&&` 保证只有完整下载成功才会运行安装脚本；非 root 用户运行时会自动通过 sudo 重新执行。交互输入始终从终端读取。安装指定版本：把 `latest/download` 换成 `download/v1.0.0`，并写成 `PRODUCT_HUB_VERSION=v1.0.0 bash install.sh`。
 
 `install.sh` 依次执行：
 

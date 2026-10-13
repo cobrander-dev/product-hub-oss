@@ -1,7 +1,10 @@
 #!/bin/sh
 # Product Hub 一键安装 / One-line installer
 #
-#   bash <(curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh)
+#   curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh -o install.sh && bash install.sh
+#
+# The script runs only after curl has saved the whole file. Started by a non-root user, it
+# re-runs itself through sudo.
 #
 # Downloads a published release bundle, verifies its SHA-256 checksums (and its
 # GitHub artifact attestation when the gh CLI is available), then runs the
@@ -14,6 +17,7 @@ cli_path=/usr/local/bin/product-hub
 docker_gpg_fingerprint=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
 
 say() { printf '%s\n' "$*"; }
+step() { printf '\n[%s/5] %s\n' "$1" "$2"; }
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   [ -z "${2:-}" ] || printf '%s\n' "$2" >&2
@@ -26,7 +30,13 @@ ask() {
   printf '%s' "$answer"
 }
 
-[ "$(id -u)" -eq 0 ] || fail ROOT_REQUIRED '请使用 root 运行，或在命令前加 sudo。'
+if [ "$(id -u)" -ne 0 ]; then
+  # A piped script cannot be re-run safely, so only a downloaded file is elevated.
+  if [ -f "$0" ] && command -v sudo >/dev/null 2>&1; then
+    exec sudo ${PRODUCT_HUB_VERSION:+"PRODUCT_HUB_VERSION=$PRODUCT_HUB_VERSION"} sh "$0"
+  fi
+  fail ROOT_REQUIRED '请使用 root 运行，或在命令前加 sudo。'
+fi
 [ "$(uname -s)" = Linux ] || fail LINUX_REQUIRED '仅支持 Linux 服务器。'
 [ "$(uname -m)" = x86_64 ] || fail X86_64_REQUIRED '仅支持 x86_64 (amd64) 服务器。'
 [ -r /dev/tty ] || fail TTY_REQUIRED '需要交互式终端（请通过 SSH 登录后运行）。'
@@ -44,18 +54,22 @@ if [ -e "$install_root" ] || [ -e "$cli_path" ]; then
   fail EXISTING_INSTALLATION "检测到 $install_root 已存在但管理命令缺失，安装程序不会覆盖，请人工检查。"
 fi
 
+step 1 '正在检查系统'
 . /etc/os-release 2>/dev/null || true
 os_id=${ID:-unknown}
 os_version=${VERSION_ID:-unknown}
 case "$os_id $os_version" in
   "ubuntu 24.04") ;;
-  "ubuntu 22.04" | "debian 12" | "debian 13")
+  "ubuntu 22.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
     say "提示：当前系统为 $os_id $os_version，正式验证环境为 Ubuntu 24.04。" ;;
   *)
     say "提示：当前系统 $os_id $os_version 未经验证，建议使用 Ubuntu 24.04。"
     case "$(ask '仍要继续吗？[y/N]: ')" in y | Y) ;; *) exit 1 ;; esac ;;
 esac
 
+say "系统：$os_id $os_version（x86_64）"
+
+step 2 '正在安装依赖'
 # Small host tools used by setup and the admin CLI.
 missing=''
 for tool in curl:curl openssl:openssl ss:iproute2 tar:tar sha256sum:coreutils gpg:gnupg; do
@@ -96,6 +110,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
   esac
 fi
 docker info >/dev/null 2>&1 || fail DOCKER_DAEMON_UNAVAILABLE 'Docker 服务未运行，请执行 systemctl start docker 后重试。'
+say 'Docker 已就绪。'
 
 # Public IP suggestion for installs without a domain. Only the address itself
 # is requested; the user confirms or replaces it in setup.
@@ -112,7 +127,7 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-say '下载安装包...'
+say '正在下载安装包...'
 for asset in product-hub-installer.tar.gz SHA256SUMS; do
   curl -fsSL --proto '=https' --tlsv1.2 "$base/$asset" -o "$work/$asset" ||
     fail RELEASE_DOWNLOAD_FAILED '下载失败，请检查网络或 GitHub 访问。'

@@ -16,13 +16,13 @@ Product Hub 是一个中文、自托管的内部产品资料与厂家报价数�
 
 ## 一键安装
 
-在一台全新的 Ubuntu 24.04 x86_64 服务器上，以 root 身份运行：
+在一台全新的 Ubuntu 24.04 x86_64 服务器上，以 root 或有 sudo 权限的用户复制运行这一条命令：
 
 ```bash
-bash <(curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh)
+curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/download/install.sh -o install.sh && bash install.sh
 ```
 
-安装程序全程中文交互：
+只有安装脚本完整下载成功后才会执行（`&&`）；非 root 用户会自动通过 sudo 运行。安装程序全程中文交互，并按“检查系统 → 安装依赖 → 下载镜像 → 配置服务 → 安装成功”显示进度：
 
 1. 检测系统；未安装 Docker 时询问后从 Docker 官方源安装（校验官方 GPG 密钥指纹）。
 2. 下载发布安装包并校验 SHA-256；已安装 `gh` 并登录时额外验证 GitHub 来源证明（attestation）。
@@ -30,7 +30,7 @@ bash <(curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/late
 4. 自动生成数据库与认证密钥，初始化数据库并启动服务。
 5. 创建管理员账号（密码隐藏输入）。
 
-推荐配置 4 vCPU / 8 GiB 内存 / 80 GiB 磁盘。云服务器请在安全组放行 TCP 80 和 443。再次运行同一命令会打开管理菜单，不会覆盖已有安装。指定版本：`PRODUCT_HUB_VERSION=v1.0.0` 放在命令前。
+推荐配置 4 vCPU / 8 GiB 内存 / 80 GiB 磁盘。云服务器请在安全组放行 TCP 80 和 443。再次运行同一命令会打开管理菜单，不会覆盖已有安装。安装指定版本（包括测试版）：把 `latest/download` 换成 `download/版本号`，并把 `bash install.sh` 写成 `PRODUCT_HUB_VERSION=版本号 bash install.sh`，例如 `v0.9.0-rc.1`。
 
 ## HTTPS
 

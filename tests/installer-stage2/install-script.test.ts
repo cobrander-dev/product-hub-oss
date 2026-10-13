@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const script = readFileSync("install.sh", "utf8");
@@ -70,4 +72,35 @@ test("install.sh and product-hub accept SemVer pre-releases but reject other ver
     ])
       assert.ok(!accepts(value), value);
   }
+});
+
+test("a downloaded install.sh re-runs itself through sudo; a piped one stops", (t) => {
+  if (process.getuid?.() === 0) return t.skip("needs a non-root user");
+  const dir = mkdtempSync(join(tmpdir(), "ph-elevate-"));
+  writeFileSync(join(dir, "sudo"), '#!/bin/sh\nprintf "[%s]" "$@"\n', {
+    mode: 0o755,
+  });
+  writeFileSync(join(dir, "install.sh"), script);
+  const env = {
+    ...process.env,
+    PATH: `${dir}:${process.env.PATH}`,
+    PRODUCT_HUB_VERSION: "v0.9.0-rc.1",
+  };
+  const fromFile = spawnSync("sh", ["install.sh"], {
+    cwd: dir,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(
+    fromFile.stdout,
+    "[PRODUCT_HUB_VERSION=v0.9.0-rc.1][sh][install.sh]",
+  );
+  const piped = spawnSync("sh", [], {
+    cwd: dir,
+    env,
+    input: script,
+    encoding: "utf8",
+  });
+  assert.notEqual(piped.status, 0);
+  assert.match(piped.stderr, /ROOT_REQUIRED/);
 });

@@ -18,8 +18,11 @@ const inspectSchema = z
         Os: z.string(),
         Architecture: z.string(),
         RepoDigests: z.array(z.string()).default([]),
+        // Docker 29 (containerd image store) omits Labels for unlabeled images
+        // such as postgres; Docker 28 reports null. Product images still must
+        // carry exact revision/version labels (verifyImageLabels).
         Config: z
-          .object({ Labels: z.record(z.string(), z.string()).nullable() })
+          .object({ Labels: z.record(z.string(), z.string()).nullish() })
           .passthrough(),
       })
       .passthrough(),

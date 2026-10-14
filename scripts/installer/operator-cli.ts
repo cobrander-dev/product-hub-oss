@@ -270,9 +270,11 @@ async function setup(manifestPath: string) {
   demand(process.getuid?.() === 0, "ROOT_REQUIRED");
   const manifest = parseReleaseManifest(readFileSync(manifestPath, "utf8"));
   const paths = installationPaths(manifest);
-  const access = await askAccessHost();
+  const gateway = process.env.PRODUCT_HUB_HTTPS_MODE === "gateway";
+  const access = await askAccessHost(gateway);
   const settings = askBuiltinHttps(access);
   const builtinHttps = settings !== undefined;
+  const entry = gateway ? "gateway" : builtinHttps ? "builtin" : "external";
   const domain = access.host;
   pullAndVerify(manifest);
   installSoftwareBundle(manifest);
@@ -326,29 +328,40 @@ async function setup(manifestPath: string) {
   }
   atomicWrite(
     join(paths.config, "access"),
-    renderAccessFile(access, builtinHttps, settings),
+    renderAccessFile(access, entry, settings),
     0o644,
   );
   promoteManifest(manifest);
   process.stdout.write(
-    settings
-      ? `PASS: setup complete\n安装完成。访问地址: ${publicOrigin(access.host, settings.port)}\n`
-      : `PASS: setup complete\n安装完成。应用仅监听 127.0.0.1:${config.appPort}，请按 ${paths.proxy} 中的示例配置你自己的 HTTPS 反向代理。\n`,
+    gateway
+      ? `PASS: setup complete\n安装完成。访问地址: https://${access.host}（经共享 HTTPS 网关）\n`
+      : settings
+        ? `PASS: setup complete\n安装完成。访问地址: ${publicOrigin(access.host, settings.port)}\n`
+        : `PASS: setup complete\n安装完成。应用仅监听 127.0.0.1:${config.appPort}，请按 ${paths.proxy} 中的示例配置你自己的 HTTPS 反向代理。\n`,
   );
 }
 
-async function askAccessHost(): Promise<AccessHost> {
-  const suggested = process.env.PRODUCT_HUB_SUGGESTED_IP || "";
+async function askAccessHost(gateway = false): Promise<AccessHost> {
+  const suggested = gateway ? "" : process.env.PRODUCT_HUB_SUGGESTED_IP || "";
   process.stdout.write(
-    "\n访问地址：有域名请输入域名（例如 hub.example.com，需已解析到本服务器）。\n" +
-      "没有域名可直接使用服务器 IP，HTTPS 证书会自动申请；申请失败时使用自签名证书。\n",
+    gateway
+      ? "\n访问域名：共享 HTTPS 网关按域名转发，请输入已解析到本服务器的域名（例如 products.example.com）。\n"
+      : "\n访问地址：有域名请输入域名（例如 hub.example.com，需已解析到本服务器）。\n" +
+          "没有域名可直接使用服务器 IP，HTTPS 证书会自动申请；申请失败时使用自签名证书。\n",
   );
-  const answer = await question(
-    suggested
-      ? `域名或 IP（直接回车使用 ${suggested}）: `
-      : "域名或服务器公网 IP: ",
-  );
-  return parseAccessHost(answer || suggested);
+  for (let attempt = 0; ; attempt++) {
+    const answer = await question(
+      suggested
+        ? `域名或 IP（直接回车使用 ${suggested}）: `
+        : gateway
+          ? "域名: "
+          : "域名或服务器公网 IP: ",
+    );
+    const access = parseAccessHost(answer || suggested);
+    if (!gateway || access.kind === "domain") return access;
+    demand(attempt < 2, "GATEWAY_REQUIRES_DOMAIN");
+    process.stdout.write("共享 HTTPS 网关需要域名，请输入域名。\n");
+  }
 }
 
 // The port and the certificate path were chosen on the host by setup.sh, which
@@ -357,6 +370,11 @@ export function askBuiltinHttps(
   access: AccessHost,
   env: Record<string, string | undefined> = process.env,
 ): HttpsSettings | undefined {
+  // The shared gateway is the HTTPS entry; Product Hub stays on 127.0.0.1:3000.
+  if (env.PRODUCT_HUB_HTTPS_MODE === "gateway") {
+    demand(access.kind === "domain", "GATEWAY_REQUIRES_DOMAIN");
+    return undefined;
+  }
   if (env.PRODUCT_HUB_HTTPS_MODE === "external") {
     demand(access.kind === "domain", "IP_ACCESS_REQUIRES_BUILTIN_HTTPS");
     process.stdout.write(

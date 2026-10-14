@@ -200,6 +200,10 @@ App、Hard Delete Worker、普通 migration、database-job 与 admin-bootstrap C
 
 Control container 在 drop ALL 后仅增加 CHOWN 与 DAC_READ_SEARCH，以创建并校验 1001:1001 0400 Worker secret；权限不传递给 App/Worker。network none 下健康探测通过 Docker exec 在 App 内执行，doctor 数据库检查通过既有一次性 database-job 的 verify 分支执行，只使用 read-only transaction，不修改数据库或长期服务。该诊断容器无 socket，结束即删除。
 
+## 22a. Shared HTTPS gateway boundary
+
+共享网关（`docs/HTTPS_GATEWAY.md`）是独立于 Product Hub 的 Compose project `oss-gateway`：官方 Caddy 镜像按 digest 固定，host 网络、只读根文件系统、`cap_drop: ALL` 仅加 `NET_BIND_SERVICE`、no-new-privileges；管理接口只在容器卷内 Unix socket，不监听 TCP。Product Hub 仅向其写入自己的站点文件，内容只能是本域名的单个站点块（不得 import），与安装器生成的反向代理头约定一致（覆盖 Host/X-Forwarded-*、丢弃 Forwarded、HSTS）。App 仍只绑定回环地址。网关无法安全接管的 80/443 占用者不得被停止、覆盖或修改。
+
 ## 23. Optional built-in HTTPS boundary
 
 一键安装可选择内置 HTTPS：独立 Compose 项目 `product-hub-https` 复用与 App 相同、已扫描并 attestation 的 Runner digest 中的 Caddy（官方 tag 源码、补丁版 Go 构建），以 UID 1001、只读根文件系统、`cap_drop: ALL`、no-new-privileges 运行，只加入 App frontend 网络，不能访问 backend/PostgreSQL 网络；admin API 关闭，配置文件只读挂载且不含密钥。代理设置 12 MB 请求体上限与读写超时；HSTS 仅在域名模式发送。

@@ -125,6 +125,12 @@ Hard Delete 只覆盖当前 PostgreSQL 与当前 uploads。历史 backup 和运�
 
 首次安装在任何写入前检查 `/opt/product-hub`、CLI、Compose project/containers/volumes/network 与 port。通过后由固定 Migrator digest 的一次性 control container 调用既有 bootstrap。安装只生成 Caddy/Nginx snippet，不安装、覆盖、reload 或 restart reverse proxy。
 
+### 11.0 Shared HTTPS gateway (recommended for several projects)
+
+安装向导的 HTTPS 方式依次为：共享 HTTPS 网关（推荐）、独立 HTTPS 端口（高级，见 11.1）、现有反向代理。共享网关遵循 `docs/HTTPS_GATEWAY.md`：独立 Docker Compose project `oss-gateway`（host 网络，Caddy 管理接口仅为容器内 Unix socket）占用 80/443，按域名转发到各项目的回环端口；Product Hub 仍只监听 `127.0.0.1:3000`，`BETTER_AUTH_URL` 为不带端口的 `https://domain`。
+
+网关模式只支持域名。安装程序在拉取镜像前检测 80/443：空闲时经确认创建网关；已有网关时添加站点；由 systemd Caddy 使用 `/etc/caddy/Caddyfile` 占用时添加带标记的站点块；其他占用者（Nginx、其他容器等）一律停止并说明原因，不做任何修改。每次修改先在副本上校验完整配置、备份、无中断 reload，失败自动恢复；站点文件只能定义本项目域名，不得 import。网关不属于任何应用，Product Hub 的安装、更新、备份不会修改网关或其他站点。`config/access` 记录 `https=gateway`。
+
 ### 11.1 Built-in HTTPS port and certificate validation
 
 安装向导询问 HTTPS 端口：默认 443，也允许 1024–65535；80 保留给 HTTP 与证书验证。所选端口（TCP/UDP 监听或 Docker 发布）已被占用时只报告占用者并要求换端口，不停止、不覆盖、不修改任何其他程序或 Compose project。输入 `p` 选择现有反向代理模式（仅域名）。

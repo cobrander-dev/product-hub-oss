@@ -39,7 +39,7 @@ jobs:
       - run: pnpm test:installer-foundation
       - run: pnpm test:distribution
       - name: ShellCheck installer scripts
-        run: shellcheck -S warning setup.sh install.sh scripts/product-hub tests/https-ports/multi-project-e2e.sh
+        run: shellcheck -S warning setup.sh install.sh scripts/product-hub scripts/oss-gateway.sh tests/https-ports/multi-project-e2e.sh
       - name: Validate rendered Caddyfiles with Caddy 2.11
         run: |
           mkdir -p "$RUNNER_TEMP/caddy"
@@ -55,7 +55,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [invoice-first, hub-first]
+        scenario:
+          [invoice-first, hub-first, gateway-invoice-first, gateway-hub-first]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

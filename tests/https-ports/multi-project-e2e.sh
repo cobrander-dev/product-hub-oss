@@ -3,12 +3,16 @@
 # Generator (INVOICE_DIR checkout), each installed by its real installer with its
 # own HTTPS port. Runs ONLY as root on a disposable GitHub Actions runner.
 #
-#   usage: sudo -E INVOICE_DIR=... tests/https-ports/multi-project-e2e.sh invoice-first|hub-first
+#   usage: sudo -E INVOICE_DIR=... tests/https-ports/multi-project-e2e.sh SCENARIO
 #
 #   invoice-first  Invoice on 8443 owns port 80 (relay holder); Product Hub on 9443
 #                  gets its certificate through the relay (member).
 #   hub-first      Product Hub on the default 443 owns port 80; Invoice on 8443 is
 #                  the member.
+#   gateway-invoice-first / gateway-hub-first
+#                  shared HTTPS gateway (docs/HTTPS_GATEWAY.md): both projects on standard
+#                  443 with their own domains and no port in the address, plus an extra
+#                  service added with `oss-gateway add`.
 #
 # Certificates come from Pebble (Let's Encrypt's ACME test server) on the shared
 # relay network; its mock DNS points every name at this host, so validation reaches
@@ -16,14 +20,16 @@
 # are built from this checkout and served by a local registry answering as ghcr.io.
 set -Eeuo pipefail
 
-scenario="${1:?usage: multi-project-e2e.sh invoice-first|hub-first}"
+scenario="${1:?usage: multi-project-e2e.sh invoice-first|hub-first|gateway-invoice-first|gateway-hub-first}"
 hub="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 invoice="${INVOICE_DIR:?INVOICE_DIR must point at an invoice-generator-oss checkout}"
 [[ "${CI:-}" == true && "${GITHUB_ACTIONS:-}" == true && "$(id -u)" -eq 0 ]] || {
   echo 'refusing to run outside a disposable GitHub Actions runner as root' >&2
   exit 1
 }
-case "$scenario" in invoice-first | hub-first) ;; *) echo "unknown scenario $scenario" >&2 && exit 2 ;; esac
+case "$scenario" in invoice-first | hub-first | gateway-invoice-first | gateway-hub-first) ;; *) echo "unknown scenario $scenario" >&2 && exit 2 ;; esac
+gateway_mode=0
+[[ "$scenario" != gateway-* ]] || gateway_mode=1
 
 work="$(mktemp -d)"
 chmod 755 "$work"
@@ -49,7 +55,9 @@ fetch() { # URL SHA256 DEST
 
 invoice_host=invoice.ci.test
 hub_host=hub.ci.test
-if [[ "$scenario" == invoice-first ]]; then
+if [[ "$gateway_mode" == 1 ]]; then
+  invoice_port=443 hub_port=443
+elif [[ "$scenario" == invoice-first ]]; then
   invoice_port=8443 hub_port=9443
 else
   invoice_port=8443 hub_port=443
@@ -85,12 +93,14 @@ docker run -d --name ci-challtestsrv --network oss-https-relay -v "$work/pebble:
   /p/challtestsrv -defaultIPv4 "$gateway" -defaultIPv6 '' -dnsserver :8053 -http01 '' -https01 '' \
   -tlsalpn01 '' -doh '' -management :8055 >/dev/null
 dns="$(docker inspect --format '{{(index .NetworkSettings.Networks "oss-https-relay").IPAddress}}' ci-challtestsrv)"
-docker run -d --name ci-pebble --network oss-https-relay --network-alias pebble -p 127.0.0.1:15000:15000 \
+docker run -d --name ci-pebble --network oss-https-relay --network-alias pebble -p 127.0.0.1:15000:15000 -p 127.0.0.1:14000:14000 \
   -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -v "$work/pebble:/p:ro" busybox:1.37 \
   /p/pebble -config /p/pebble.json -dnsserver "$dns:8053" >/dev/null
 for _ in $(seq 1 30); do curl -fsk https://127.0.0.1:15000/roots/0 -o "$work/pebble-root.pem" && break; sleep 1; done
 [[ -s "$work/pebble-root.pem" ]] || fail 'Pebble did not start'
 acme_ca=https://pebble:14000/dir
+# The gateway uses the host network and reaches Pebble on its published loopback port.
+export OSS_GATEWAY_ACME_CA=https://127.0.0.1:14000/dir OSS_GATEWAY_ACME_CA_ROOT="$work/pebble/minica.pem"
 
 step 'release artifacts: Invoice bundles and Product Hub images'
 docker build -q -t invoice-generator:ci-a "$invoice" >/dev/null
@@ -153,15 +163,20 @@ hub_password="TEST-hub-$(openssl rand -hex 12)"
 printf '%s' "$invoice_password" >"$work/invoice-password"
 chmod 600 "$work/invoice-password"
 
-install_invoice() { # PORT
-  IG_NONINTERACTIVE=1 IG_BUNDLE_FILE="$work/invoice-a/invoice-generator-installer.tar.gz" IG_ACCESS_HOST="$invoice_host" \
-    IG_HTTPS_PORT="$1" IG_ACME_CA="$acme_ca" IG_ACME_CA_ROOT="$work/pebble/minica.pem" IG_ADMIN_USERNAME=ci-admin \
+install_invoice() { # PORT | gateway
+  local mode=(IG_HTTPS_PORT="$1")
+  [[ "$1" != gateway ]] || mode=(IG_HTTPS_MODE=gateway)
+  env IG_NONINTERACTIVE=1 IG_BUNDLE_FILE="$work/invoice-a/invoice-generator-installer.tar.gz" IG_ACCESS_HOST="$invoice_host" \
+    "${mode[@]}" IG_ACME_CA="$acme_ca" IG_ACME_CA_ROOT="$work/pebble/minica.pem" IG_ADMIN_USERNAME=ci-admin \
     IG_ADMIN_PASSWORD_FILE="$work/invoice-password" bash "$work/invoice-a/install.sh"
 }
-install_hub() { # PORT (interactive wizard driven through a PTY)
-  printf '%s' '[["域名或", "hub.ci.test"], ["管理员用户名", "ci_admin"], ["管理员显示名称", "CI Admin"], ["管理员密码", "env:HUB_PASSWORD"], ["再次输入管理员密码", "env:HUB_PASSWORD"]]' \
-    >"$work/hub-answers.json"
-  HUB_PASSWORD="$hub_password" PRODUCT_HUB_RELEASE_MANIFEST="$work/hub-v0.9.1-ci.1.manifest" PRODUCT_HUB_HTTPS_PORT="$1" \
+install_hub() { # PORT | gateway (interactive wizard driven through a PTY)
+  local mode=(PRODUCT_HUB_HTTPS_PORT="$1") prompt='域名或'
+  [[ "$1" != gateway ]] || mode=(PRODUCT_HUB_HTTPS_MODE=gateway) prompt='域名: '
+  printf '[["%s", "hub.ci.test"],' "$prompt" >"$work/hub-answers.json"
+  printf '%s' ' ["管理员用户名", "ci_admin"], ["管理员显示名称", "CI Admin"], ["管理员密码", "env:HUB_PASSWORD"], ["再次输入管理员密码", "env:HUB_PASSWORD"]]' \
+    >>"$work/hub-answers.json"
+  env HUB_PASSWORD="$hub_password" PRODUCT_HUB_RELEASE_MANIFEST="$work/hub-v0.9.1-ci.1.manifest" "${mode[@]}" \
     PRODUCT_HUB_ACME_CA="$acme_ca" PRODUCT_HUB_ACME_CA_ROOT="$work/pebble/minica.pem" \
     python3 "$invoice/tests/installer/drive-tty.py" "$work/hub-answers.json" -- sh "$hub/setup.sh" | tee "$work/hub-setup.log"
 }
@@ -230,7 +245,33 @@ started() {
 }
 role_of() { docker inspect --format '{{index .Config.Labels "oss.https-relay"}}' "$(https_container "$1" "$2")"; }
 
-if [[ "$scenario" == invoice-first ]]; then
+gateway_sites() { find /opt/oss-gateway/sites -name '*.caddy' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' '; }
+if [[ "$scenario" == gateway-invoice-first ]]; then
+  step 'Invoice Generator creates the shared HTTPS gateway (80/443 free)'
+  install_invoice gateway
+  grep -q '^GATEWAY=yes$' /opt/invoice-generator/config/installer.env || fail 'Invoice gateway mode'
+  expect_trusted "$invoice_host" 443
+
+  step 'Product Hub cannot take port 443 from the gateway in port mode'
+  expect_failure HTTPS_PORT_IN_USE env PRODUCT_HUB_RELEASE_MANIFEST="$work/hub-v0.9.1-ci.1.manifest" \
+    PRODUCT_HUB_HTTPS_PORT=443 sh "$hub/setup.sh"
+  [[ ! -e /opt/product-hub ]] || fail 'refused install left files behind'
+
+  step 'Product Hub adds its own domain to the existing gateway'
+  install_hub gateway
+elif [[ "$scenario" == gateway-hub-first ]]; then
+  step 'Product Hub creates the shared HTTPS gateway (80/443 free)'
+  install_hub gateway
+  expect_trusted "$hub_host" 443
+
+  step 'Invoice Generator cannot take port 443 from the gateway in port mode'
+  expect_failure HTTPS_PORT_IN_USE install_invoice 443
+  [[ ! -e /opt/invoice-generator/config/installer.env ]] || fail 'refused install left an installation marker'
+  rm -rf /opt/invoice-generator
+
+  step 'Invoice Generator adds its own domain to the existing gateway'
+  install_invoice gateway
+elif [[ "$scenario" == invoice-first ]]; then
   step "Invoice Generator on $invoice_port while port 80 is free -> relay holder"
   install_invoice "$invoice_port"
   grep -q '^RELAY_ROLE=holder$' /opt/invoice-generator/config/installer.env || fail 'Invoice must be the holder'
@@ -272,8 +313,36 @@ invoice_login
 hub_login
 grep -q "^APP_ORIGIN=$invoice_origin$" /opt/invoice-generator/config/app.env || fail 'Invoice APP_ORIGIN'
 grep -q "^BETTER_AUTH_URL=$hub_origin$" /opt/product-hub/config/product-hub.env || fail 'Product Hub BETTER_AUTH_URL'
-[[ "$(role_of invoice-generator caddy)" =~ ^(holder|member)$ && "$(role_of product-hub-https https)" =~ ^(holder|member)$ ]] ||
-  fail 'relay labels'
+if [[ "$gateway_mode" == 1 ]]; then
+  [[ "$invoice_origin" == https://invoice.ci.test && "$hub_origin" == https://hub.ci.test ]] || fail 'origins must not carry a port'
+  grep -qx 'https=gateway' /opt/product-hub/config/access || fail 'Product Hub gateway mode'
+  [[ "$(gateway_sites)" == 'invoice-generator.caddy product-hub.caddy ' ]] || fail "gateway sites: $(gateway_sites)"
+  [[ "$(docker port "$(https_container invoice-generator app)" 3000/tcp)" == 127.0.0.1:3001 ]] || fail 'Invoice must listen on 127.0.0.1:3001 only'
+  ss -H -ltn 'sport = :3000' | grep -q '127.0.0.1:3000' || fail 'Product Hub must listen on 127.0.0.1:3000'
+  ! ss -H -ltn 'sport = :3000' | grep -qv '127.0.0.1:3000' || fail 'Product Hub port 3000 exposed beyond loopback'
+  [[ -z "$(https_container invoice-generator caddy)$(https_container product-hub-https https)" ]] ||
+    fail 'projects must not run their own HTTPS proxies behind the gateway'
+
+  step 'the gateway refuses a taken domain and a broken site; every site keeps working'
+  sites_before="$(cat /opt/oss-gateway/sites/*.caddy | sha256sum)"
+  expect_failure GATEWAY_SITE_CONFLICT oss-gateway add stolen "$hub_host" 127.0.0.1:9
+  printf 'broken.ci.test {\n\tnot_a_directive\n}\n' >"$work/broken.caddy"
+  expect_failure GATEWAY_CONFIG_INVALID oss-gateway add-site broken broken.ci.test "$work/broken.caddy"
+  [[ "$(cat /opt/oss-gateway/sites/*.caddy | sha256sum)" == "$sites_before" ]] || fail 'refused changes modified the gateway'
+  expect_trusted "$invoice_host" 443
+  expect_trusted "$hub_host" 443
+
+  step 'a third service (n8n-like) gets its own domain and certificate through the gateway'
+  docker run -d --name ci-extra --network host busybox:1.37 sh -c \
+    'mkdir -p /www && echo extra-service > /www/index.html && httpd -f -p 127.0.0.1:5678 -h /www' >/dev/null
+  oss-gateway add extra extra.ci.test 127.0.0.1:5678
+  expect_trusted extra.ci.test 443
+  curl -fsS --cacert "$work/pebble-root.pem" --resolve extra.ci.test:443:127.0.0.1 https://extra.ci.test/ | grep -q extra-service ||
+    fail 'extra service not served'
+else
+  [[ "$(role_of invoice-generator caddy)" =~ ^(holder|member)$ && "$(role_of product-hub-https https)" =~ ^(holder|member)$ ]] ||
+    fail 'relay labels'
+fi
 invoice-generator doctor
 product-hub doctor
 
@@ -287,12 +356,34 @@ for name in $attached; do
   esac
 done
 
+# probe URL HOST: requests the site every half second until stopped; counts failures.
+probe_start() {
+  rm -f "$work/probe.failures"
+  (
+    while [[ ! -f "$work/probe.stop" ]]; do
+      curl -fsS --max-time 5 --cacert "$work/pebble-root.pem" --resolve "$2:${3:-443}:127.0.0.1" -o /dev/null "$1" ||
+        echo fail >>"$work/probe.failures"
+      sleep 0.5
+    done
+  ) &
+  probe_pid=$!
+}
+probe_stop() {
+  touch "$work/probe.stop"
+  wait "$probe_pid"
+  rm -f "$work/probe.stop"
+  [[ ! -s "$work/probe.failures" ]] || fail "$1 was interrupted ($(wc -l <"$work/probe.failures") failed requests)"
+}
+
 step 'upgrading Product Hub leaves Invoice running'
 before="$(started invoice-generator)"
+probe_start "$invoice_origin/login" "$invoice_host" "$invoice_port"
 install -m 0644 "$work/hub-v0.9.1-ci.2.manifest" /opt/product-hub/releases/target.manifest
 product-hub update --manifest /opt/product-hub/releases/target.manifest </dev/null
 grep -q '^version=v0.9.1-ci.2$' /opt/product-hub/releases/current.manifest || fail 'Product Hub version after upgrade'
-grep -qx "port=$hub_port" /opt/product-hub/config/access || fail 'upgrade changed the Product Hub port'
+probe_stop 'Invoice during the Product Hub upgrade'
+[[ "$gateway_mode" == 1 ]] || grep -qx "port=$hub_port" /opt/product-hub/config/access || fail 'upgrade changed the Product Hub port'
+[[ "$gateway_mode" == 0 ]] || grep -qx 'https=gateway' /opt/product-hub/config/access || fail 'upgrade changed the Product Hub mode'
 [[ "$(started invoice-generator)" == "$before" ]] || fail 'Product Hub upgrade restarted Invoice'
 expect_trusted "$hub_host" "$hub_port"
 expect_redirect "$invoice_host" "$invoice_port"
@@ -301,8 +392,10 @@ invoice_login
 
 step 'upgrading Invoice leaves Product Hub running'
 before="$(started product-hub) $(started product-hub-https)"
+probe_start "$hub_origin/login" "$hub_host" "$hub_port"
 sha="$(awk '$2 == "invoice-generator-installer.tar.gz" {print $1}' "$work/invoice-b/SHA256SUMS")"
 invoice-generator upgrade --bundle "$work/invoice-b/invoice-generator-installer.tar.gz" --sha256 "$sha" --yes
+probe_stop 'Product Hub during the Invoice upgrade'
 [[ "$(invoice-generator version)" == 'Invoice Generator v0.0.1-ci.2' ]] || fail 'Invoice version after upgrade'
 grep -q "^HTTPS_PORT=$invoice_port$" /opt/invoice-generator/config/installer.env || fail 'upgrade changed the Invoice port'
 [[ "$(started product-hub) $(started product-hub-https)" == "$before" ]] || fail 'Invoice upgrade restarted Product Hub'
@@ -323,13 +416,21 @@ for _ in $(seq 1 90); do
   sleep 10
   # Once inside the renewal window, one restart makes Caddy check its certificates
   # at once instead of waiting for its maintenance timer.
-  if [[ "$invoice_restarted" == 0 && "$(remaining "$invoice_host" "$invoice_port")" -lt 280 ]]; then
-    docker restart "$(https_container invoice-generator caddy)" >/dev/null
-    invoice_restarted=1
-  fi
-  if [[ "$hub_restarted" == 0 && "$(remaining "$hub_host" "$hub_port")" -lt 280 ]]; then
-    docker restart "$(https_container product-hub-https https)" >/dev/null
-    hub_restarted=1
+  if [[ "$gateway_mode" == 1 ]]; then
+    # One gateway serves both domains.
+    if [[ "$invoice_restarted" == 0 && "$(remaining "$invoice_host" 443)" -lt 280 && "$(remaining "$hub_host" 443)" -lt 280 ]]; then
+      docker restart "$(docker ps -q --filter label=oss.gateway=1)" >/dev/null
+      invoice_restarted=1
+    fi
+  else
+    if [[ "$invoice_restarted" == 0 && "$(remaining "$invoice_host" "$invoice_port")" -lt 280 ]]; then
+      docker restart "$(https_container invoice-generator caddy)" >/dev/null
+      invoice_restarted=1
+    fi
+    if [[ "$hub_restarted" == 0 && "$(remaining "$hub_host" "$hub_port")" -lt 280 ]]; then
+      docker restart "$(https_container product-hub-https https)" >/dev/null
+      hub_restarted=1
+    fi
   fi
   if [[ "$(certificate "$invoice_host" "$invoice_port" -serial 2>/dev/null)" != "$invoice_serial" &&
     "$(certificate "$hub_host" "$hub_port" -serial 2>/dev/null)" != "$hub_serial" ]]; then
@@ -342,5 +443,18 @@ expect_trusted "$invoice_host" "$invoice_port"
 expect_trusted "$hub_host" "$hub_port"
 invoice_login
 hub_login
+
+if [[ "$gateway_mode" == 1 ]]; then
+  step 'removing one project (simulated uninstall) leaves the other project and the gateway intact'
+  probe_start "$hub_origin/login" "$hub_host" 443
+  oss-gateway remove invoice-generator
+  for id in $(docker ps -aq --filter label=com.docker.compose.project=invoice-generator); do docker rm -f "$id" >/dev/null; done
+  probe_stop 'Product Hub while Invoice was removed'
+  [[ "$(gateway_sites)" == 'extra.caddy product-hub.caddy ' ]] || fail "gateway sites after removal: $(gateway_sites)"
+  [[ -n "$(docker volume ls -q --filter label=com.docker.compose.project=product-hub)" ]] || fail 'Product Hub volumes'
+  docker volume inspect invoice-generator_data >/dev/null || fail 'Invoice data volume must be kept'
+  hub_login
+  product-hub doctor
+fi
 
 printf '\nMULTI-PROJECT PASS (%s)\n' "$scenario"

@@ -194,15 +194,35 @@ export function readAccessFile(root: string) {
           issuer: values.issuer,
           acmeCa: values.acme_ca,
         });
-  return { access, builtin: values.https === "builtin", settings };
+  demand(
+    ["builtin", "gateway", "external"].includes(values.https || ""),
+    "INVALID_ACCESS_CONFIG",
+  );
+  return {
+    access,
+    builtin: values.https === "builtin",
+    entry: values.https as HttpsEntry,
+    settings,
+  };
 }
+
+// https=builtin (own proxy), gateway (shared HTTPS gateway, docs/HTTPS_GATEWAY.md) or
+// external (the operator's own reverse proxy).
+export type HttpsEntry = "builtin" | "gateway" | "external";
 
 export function renderAccessFile(
   access: AccessHost,
-  builtin: boolean,
+  builtin: boolean | HttpsEntry,
   settings?: HttpsSettings,
 ) {
-  let text = `host=${access.host}\nkind=${access.kind}\nhttps=${builtin ? "builtin" : "external"}\n`;
+  const entry: HttpsEntry =
+    typeof builtin === "string" ? builtin : builtin ? "builtin" : "external";
+  demand(
+    entry !== "gateway" || access.kind === "domain",
+    "GATEWAY_REQUIRES_DOMAIN",
+  );
+  builtin = entry === "builtin";
+  let text = `host=${access.host}\nkind=${access.kind}\nhttps=${entry}\n`;
   if (builtin && settings)
     text +=
       `port=${settings.port}\nhttp_bind=${settings.httpBind}\nrole=${settings.role}\nissuer=${settings.issuer}\n` +

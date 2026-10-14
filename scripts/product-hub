@@ -94,6 +94,19 @@ decide_relay_role() {
   [ -n "$http_bind" ] || fail NO_FREE_LOOPBACK_PORT
 }
 
+# Shared HTTPS gateway (docs/HTTPS_GATEWAY.md): `https --apply` re-adds only this
+# project's site (creating the gateway when 80/443 are free); other sites are untouched.
+if [ "$command_name" = https ] && [ "${1:-}" = --apply ] && [ -f "$access" ] && [ "$(access_value https)" = gateway ]; then
+  [ "$#" -eq 1 ] || fail UNEXPECTED_ARGUMENT
+  gateway="$install_root/oss-gateway.sh"
+  site="$install_root/proxy/Caddyfile.snippet"
+  [ -f "$gateway" ] || fail GATEWAY_SCRIPT_MISSING
+  [ -f "$site" ] || fail GATEWAY_SITE_MISSING
+  if [ "$(sh "$gateway" detect)" = absent ]; then sh "$gateway" create; fi
+  sh "$gateway" add-site product-hub "$(access_value host)" "$site"
+  exit 0
+fi
+
 # Host-side certificate view for the optional built-in HTTPS proxy. Reads only
 # public certificate data; never prints keys or configuration secrets.
 if [ "$command_name" = https ] && [ "${1:-}" != --apply ]; then
@@ -106,7 +119,8 @@ if [ "$command_name" = https ] && [ "${1:-}" != --apply ]; then
   sni="-servername $host"
   [ "$kind" != ip ] || sni=-noservername
   mode=$(access_value https)
-  if [ "$mode" != builtin ]; then
+  [ "$mode" != gateway ] || port=443
+  if [ "$mode" != builtin ] && [ "$mode" != gateway ]; then
     printf '未启用内置 HTTPS：应用监听 127.0.0.1:3000，由你自己的反向代理提供 HTTPS。\n'
     exit 0
   fi
@@ -127,6 +141,7 @@ if [ "$command_name" = https ] && [ "${1:-}" != --apply ]; then
   done
   if [ "$port" = 443 ]; then origin="https://$host"; else origin="https://$host:$port"; fi
   printf '访问地址: %s\n' "$origin"
+  [ "$mode" != gateway ] || printf 'HTTPS: 共享 HTTPS 网关 -> 127.0.0.1:3000\n'
   case "$(access_value role)" in
     holder) printf '证书验证: 本项目占用 80 端口，并为同一服务器上的其他项目转发\n' ;;
     member) printf '证书验证: 由占用 80 端口的项目转发\n' ;;
@@ -138,7 +153,11 @@ if [ "$command_name" = https ] && [ "${1:-}" != --apply ]; then
   fi
   printf '%s\n' "$certificate"
   if printf '%s' "$certificate" | grep -q 'Caddy Local Authority'; then
-    container=$(docker ps -q --filter label=com.docker.compose.project=product-hub-https --filter label=com.docker.compose.service=https)
+    if [ "$mode" = gateway ]; then
+      container=$(docker ps -q --filter label=oss.gateway=1)
+    else
+      container=$(docker ps -q --filter label=com.docker.compose.project=product-hub-https --filter label=com.docker.compose.service=https)
+    fi
     [ -n "$container" ] || fail HTTPS_PROXY_NOT_RUNNING
     root_cert="$install_root/config/https/local-root.crt"
     docker exec "$container" cat /data/caddy/pki/authorities/local/root.crt >"$root_cert.tmp"

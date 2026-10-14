@@ -35,6 +35,7 @@ if [ "$(id -u)" -ne 0 ]; then
   # A piped script cannot be re-run safely, so only a downloaded file is elevated.
   if [ -f "$0" ] && command -v sudo >/dev/null 2>&1; then
     exec sudo ${PRODUCT_HUB_VERSION:+"PRODUCT_HUB_VERSION=$PRODUCT_HUB_VERSION"} \
+      ${PRODUCT_HUB_HTTPS_MODE:+"PRODUCT_HUB_HTTPS_MODE=$PRODUCT_HUB_HTTPS_MODE"} \
       ${PRODUCT_HUB_HTTPS_PORT:+"PRODUCT_HUB_HTTPS_PORT=$PRODUCT_HUB_HTTPS_PORT"} \
       ${PRODUCT_HUB_TLS_ISSUER:+"PRODUCT_HUB_TLS_ISSUER=$PRODUCT_HUB_TLS_ISSUER"} sh "$0"
   fi
@@ -96,9 +97,9 @@ say "系统：$os_id $os_version（x86_64）"
 step 2 '正在安装依赖'
 # Small host tools used by setup and the admin CLI.
 if [ "$pkg" = dnf ]; then
-  tools='curl:curl openssl:openssl ss:iproute tar:tar sha256sum:coreutils gpg:gnupg2'
+  tools='curl:curl openssl:openssl ss:iproute tar:tar sha256sum:coreutils gpg:gnupg2 flock:util-linux'
 else
-  tools='curl:curl openssl:openssl ss:iproute2 tar:tar sha256sum:coreutils gpg:gnupg'
+  tools='curl:curl openssl:openssl ss:iproute2 tar:tar sha256sum:coreutils gpg:gnupg flock:util-linux'
 fi
 missing=''
 for tool in $tools; do

@@ -234,5 +234,21 @@ grep -F 'PRODUCT_HUB_RELAY_ROLE=holder' "$test_root/https-holder.log" >/dev/null
 grep -F 'PRODUCT_HUB_HTTP_BIND=80 ' "$test_root/https-holder.log" >/dev/null
 grep -F 'PRODUCT_HUB_HTTPS_MODE=builtin' "$test_root/https-holder.log" >/dev/null
 
+# Shared HTTPS gateway: an owner of 80/443 that cannot be managed safely stops setup
+# before any pull; otherwise the mode reaches the control container.
+! run_port_case gw-nginx PRODUCT_HUB_HTTPS_MODE=gateway FAKE_BUSY_PORTS='80 443'
+grep -F 'GATEWAY_UNAVAILABLE' "$test_root/https-gw-nginx.log.out" >/dev/null
+grep -F 'nginx' "$test_root/https-gw-nginx.log.out" >/dev/null
+! grep -E '(^| )pull |(^| )run ' "$test_root/https-gw-nginx.log" >/dev/null
+[ ! -e "$test_root/https-root-gw-nginx" ]
+! run_port_case gw-invalid PRODUCT_HUB_HTTPS_MODE=other
+grep -F 'INVALID_HTTPS_MODE' "$test_root/https-gw-invalid.log.out" >/dev/null
+# The fake control container installs nothing, so registering the site must fail loudly.
+! run_port_case gw-free PRODUCT_HUB_HTTPS_MODE=gateway
+grep -F 'PRODUCT_HUB_HTTPS_MODE=gateway' "$test_root/https-gw-free.log" >/dev/null
+grep -F 'GATEWAY_SITE_FAILED' "$test_root/https-gw-free.log.out" >/dev/null
+[ -x "$test_root/https-root-gw-free/oss-gateway.sh" ]
+
 echo 'PASS: HTTPS port selection, busy-port refusal and explicit certificate choice'
+echo 'PASS: shared HTTPS gateway refusal and mode hand-off'
 echo 'PASS: setup and CLI verification contract, formal-release promotion identity, shell preflight, existing-install stop, image identity rejection, and control-container hardening'

@@ -438,6 +438,7 @@ jobs:
           grep -qx "source_commit=$SOURCE_COMMIT" "$stage/product-hub-release.manifest"
           install -m 0755 source/setup.sh "$stage/setup.sh"
           install -m 0755 source/scripts/product-hub "$stage/scripts/product-hub"
+          install -m 0755 source/scripts/oss-gateway.sh "$stage/scripts/oss-gateway.sh"
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
             -czf "$out/product-hub-installer.tar.gz" -C "$stage" .
           install -m 0755 source/install.sh "$out/install.sh"

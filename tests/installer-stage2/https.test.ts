@@ -205,8 +205,23 @@ test("HTTPS settings are validated and round-trip through config/access", () => 
     assert.deepEqual(readAccessFile(root), {
       access,
       builtin: true,
+      entry: "builtin",
       settings,
     });
+    // Shared gateway: Product Hub stays on loopback, the gateway owns 80/443.
+    writeFileSync(
+      join(root, "config/access"),
+      renderAccessFile(access, "gateway"),
+    );
+    assert.deepEqual(readAccessFile(root), {
+      access,
+      builtin: false,
+      entry: "gateway",
+      settings: undefined,
+    });
+    assert.throws(() =>
+      renderAccessFile({ host: "203.0.113.10", kind: "ip" }, "gateway"),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -290,4 +305,30 @@ test("IP access cannot use the hostname relay and never claims a public certific
       { PRODUCT_HUB_HTTPS_MODE: "external" },
     ),
   );
+});
+
+test("gateway mode keeps Product Hub on loopback and requires a domain", () => {
+  const env = { PRODUCT_HUB_HTTPS_MODE: "gateway" };
+  assert.equal(
+    askBuiltinHttps({ host: "products.example.com", kind: "domain" }, env),
+    undefined,
+  );
+  assert.throws(() =>
+    askBuiltinHttps({ host: "203.0.113.10", kind: "ip" }, env),
+  );
+  const values = renderSourceEnvironment("products.example.com", "/opt/x");
+  assert.match(values, /^BETTER_AUTH_URL=https:\/\/products\.example\.com$/m);
+  assert.match(values, /^APP_PORT=3000$/m);
+});
+
+test("both projects ship the same shared gateway manager", () => {
+  const sibling = "../invoice-generator-oss/installer/bundle/oss-gateway.sh";
+  const own = readFileSync("scripts/oss-gateway.sh", "utf8");
+  assert.match(own, /admin unix\/\/config\/admin\.sock/);
+  assert.match(own, /network_mode: host/);
+  try {
+    assert.equal(readFileSync(sibling, "utf8"), own);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 });

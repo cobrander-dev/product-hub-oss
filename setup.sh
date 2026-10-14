@@ -73,11 +73,70 @@ valid_https_port() {
   [ "$1" -eq 443 ] || { [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }
 }
 
+has_tty() { { : </dev/tty; } 2>/dev/null; }
+
+# HTTPS entry: shared gateway (docs/HTTPS_GATEWAY.md), own port (docs/HTTPS_PORTS.md) or an
+# existing reverse proxy. Decided before any pull or write; nothing else is changed here.
+gateway_script="$script_dir/scripts/oss-gateway.sh"
+entry_mode=${PRODUCT_HUB_HTTPS_MODE:-}
+preset_entry=0
+[ -z "$entry_mode" ] || preset_entry=1
+# A preset port, or no terminal at all, keeps the original port behaviour.
+if [ -z "$entry_mode" ] && { [ -n "${PRODUCT_HUB_HTTPS_PORT:-}" ] || ! has_tty; }; then entry_mode=port; fi
+case "$entry_mode" in '' | gateway | port | external) ;; *) fail INVALID_HTTPS_MODE 'PRODUCT_HUB_HTTPS_MODE 需为 gateway、port 或 external。' ;; esac
+while [ -z "$entry_mode" ] || [ "$entry_mode" = gateway ]; do
+  if [ -z "$entry_mode" ]; then
+    tty_say "
+请选择 HTTPS 方式：
+  1) 共享 HTTPS 网关（推荐）：网址不带端口，同一服务器的多个项目共用 80/443，按域名转发（需要域名）
+  2) 独立 HTTPS 端口（高级）：本项目使用自己的 HTTPS 入口，端口可选 443 或 9443 等
+  3) 已有反向代理：只监听 127.0.0.1:3000，由你现有的 Nginx/Caddy 提供 HTTPS（需要域名）
+"
+    case "$(tty_ask '请选择 [1]: ')" in
+      '' | 1) entry_mode=gateway ;;
+      2) entry_mode=port ;;
+      3) entry_mode=external ;;
+      *) continue ;;
+    esac
+  fi
+  [ "$entry_mode" = gateway ] || break
+  [ -f "$gateway_script" ] || fail GATEWAY_SCRIPT_MISSING
+  gateway_state=$(sh "$gateway_script" detect)
+  answer=y
+  case "$gateway_state" in
+    managed)
+      printf '检测到共享 HTTPS 网关，将为本项目添加独立站点（先校验，失败自动回滚，其他站点不受影响）。\n'
+      break
+      ;;
+    host-caddy)
+      printf '检测到宿主机 Caddy 占用 80/443，将在 /etc/caddy/Caddyfile 中添加本项目站点（修改前备份，先校验再重新加载，失败自动恢复）。\n'
+      [ "$preset_entry" -eq 1 ] || answer=$(tty_ask '继续？[Y/n]: ')
+      ;;
+    absent)
+      printf '80/443 空闲：将安装共享 HTTPS 网关（Docker 项目 oss-gateway，占用 80/443），之后其他项目可直接添加自己的域名。\n'
+      [ "$preset_entry" -eq 1 ] || answer=$(tty_ask '安装共享 HTTPS 网关？[Y/n]: ')
+      ;;
+    *)
+      owner=${gateway_state#unmanageable }
+      [ "$preset_entry" -eq 0 ] || fail GATEWAY_UNAVAILABLE "80/443 已被 $owner 占用，无法安全接管；不会停止或修改它。"
+      tty_say "80/443 已被 $owner 占用，无法安全接管：不会停止或修改它。可改选“独立 HTTPS 端口”或“已有反向代理”。
+"
+      entry_mode=''
+      continue
+      ;;
+  esac
+  case "$answer" in '' | y | Y | yes | YES) break ;; esac
+  [ "$preset_entry" -eq 0 ] || fail CANCELLED
+  entry_mode=''
+done
+
 https_mode=builtin
+[ "$entry_mode" != gateway ] || https_mode=gateway
+[ "$entry_mode" != external ] || https_mode=external
 https_port=${PRODUCT_HUB_HTTPS_PORT:-}
 preset_port=0
 [ -z "$https_port" ] || preset_port=1
-while :; do
+while [ "$entry_mode" = port ]; do
   if [ -z "$https_port" ]; then
     tty_say "
 请选择 HTTPS 端口：
@@ -259,9 +318,23 @@ step 4 '正在配置服务'
 run_control
 install -o root -g root -m 0755 "$script_dir/scripts/product-hub" "$cli_path"
 printf 'PASS: Product Hub installed.\n'
-step 5 '安装成功'
 access_host=$(awk -F= '$1 == "host" { print $2 }' "$install_root/config/access" 2>/dev/null) || access_host=''
-if grep -qx 'https=builtin' "$install_root/config/access" 2>/dev/null; then
+if [ "$https_mode" = gateway ]; then
+  # Kept for `product-hub https --apply`; the gateway itself is not part of Product Hub.
+  install -o root -g root -m 0755 "$gateway_script" "$install_root/oss-gateway.sh"
+  "$cli_path" https --apply || {
+    printf '共享 HTTPS 网关站点未能添加，已回滚，其他网站未受影响。Product Hub 已安装并只在 127.0.0.1:3000 运行；\n' >&2
+    printf '处理后运行 sudo product-hub https --apply 重试。\n' >&2
+    fail GATEWAY_SITE_FAILED
+  }
+fi
+step 5 '安装成功'
+if grep -qx 'https=gateway' "$install_root/config/access" 2>/dev/null; then
+  printf '\n正在等待 HTTPS 证书（最长约 2 分钟）...\n'
+  "$cli_path" https 120 || true
+  printf '云服务器请在安全组/防火墙中放行 TCP 80 和 443。\n'
+  printf '同一服务器的其他网站可用 sudo oss-gateway add <名称> <域名> 127.0.0.1:<端口> 添加。\n'
+elif grep -qx 'https=builtin' "$install_root/config/access" 2>/dev/null; then
   printf '\n正在等待 HTTPS 证书（最长约 2 分钟）...\n'
   "$cli_path" https 120 || true
   if [ "$relay_role" = holder ]; then

@@ -12,7 +12,7 @@ docker_help='https://docs.docker.com/engine/install/ubuntu/'
 compose_help='https://docs.docker.com/compose/install/linux/'
 install_root=${PRODUCT_HUB_ROOT:-/opt/product-hub}
 cli_path=${PRODUCT_HUB_CLI_PATH:-/usr/local/bin/product-hub}
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 manifest=${PRODUCT_HUB_RELEASE_MANIFEST:-"$script_dir/product-hub-release.manifest"}
 
 [ "$(id -u)" -eq 0 ] || fail ROOT_REQUIRED_RUN_SUDO_SETUP '请使用 root 或 sudo 运行。'
@@ -217,7 +217,7 @@ fi
 
 printf 'Recommended/acceptance host profile: 4 vCPU, 8 GiB RAM, 80 GiB disk. This is not yet a declared minimum.\n'
 install -d -o root -g root -m 0700 "$install_root"
-manifest_abs=$(CDPATH= cd -- "$(dirname -- "$manifest")" && pwd)/$(basename -- "$manifest")
+manifest_abs=$(CDPATH='' cd -- "$(dirname -- "$manifest")" && pwd)/$(basename -- "$manifest")
 repository_root="$install_root/releases/$source_commit/bundle"
 
 run_control() {

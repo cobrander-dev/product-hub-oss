@@ -106,12 +106,11 @@ for tool in $tools; do
 done
 if [ -n "$missing" ]; then
   say "安装必要工具:$missing"
+  # shellcheck disable=SC2086 # $missing is a word list of package names
   case "$pkg" in
     apt)
       apt-get update -qq
-      # shellcheck disable=SC2086
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates $missing >/dev/null ;;
-    # shellcheck disable=SC2086
     dnf) dnf install -y -q ca-certificates $missing >/dev/null ;;
     *) fail TOOLS_REQUIRED "缺少工具:$missing。当前系统无法自动安装，请先手动安装后重试。" ;;
   esac

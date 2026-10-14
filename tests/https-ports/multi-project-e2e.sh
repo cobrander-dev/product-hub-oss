@@ -76,7 +76,7 @@ install -m 0755 "$(find "$work" -type f -name pebble-challtestsrv -path '*linux/
 chmod 644 "$work/pebble/"*.pem
 # Short certificate lifetime so renewal through the relay can be exercised.
 cat >"$work/pebble/pebble.json" <<'EOF'
-{"pebble":{"listenAddress":"0.0.0.0:14000","managementListenAddress":"0.0.0.0:15000","certificate":"/p/cert.pem","privateKey":"/p/key.pem","httpPort":80,"tlsPort":443,"ocspResponderURL":"","externalAccountBindingRequired":false,"certificateValidityPeriod":300}}
+{"pebble":{"listenAddress":"0.0.0.0:14000","managementListenAddress":"0.0.0.0:15000","certificate":"/p/cert.pem","privateKey":"/p/key.pem","httpPort":80,"tlsPort":443,"ocspResponderURL":"","externalAccountBindingRequired":false,"profiles":{"default":{"description":"CI","validityPeriod":900},"shortlived":{"description":"CI","validityPeriod":900}}}}
 EOF
 docker pull -q busybox:1.37 >/dev/null
 docker network create --label oss.https-relay=1 oss-https-relay >/dev/null
@@ -222,7 +222,12 @@ hub_login() {
 https_container() { # PROJECT SERVICE
   docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2"
 }
-started() { docker inspect --format '{{.State.StartedAt}}' $(docker ps -q --filter "label=com.docker.compose.project=$1") | sort | tr '\n' ' '; }
+started() {
+  local id
+  for id in $(docker ps -q --filter "label=com.docker.compose.project=$1"); do
+    docker inspect --format '{{.State.StartedAt}}' "$id"
+  done | sort | tr '\n' ' '
+}
 role_of() { docker inspect --format '{{index .Config.Labels "oss.https-relay"}}' "$(https_container "$1" "$2")"; }
 
 if [[ "$scenario" == invoice-first ]]; then
@@ -307,24 +312,32 @@ invoice_login
 hub_login
 
 step 'renewal: both certificates are renewed through the same validation paths'
-# Pebble issues 300-second certificates; Caddy renews in the last third of the lifetime.
+# Pebble issues 900-second certificates; Caddy renews in the last third of the lifetime.
 invoice_serial="$(certificate "$invoice_host" "$invoice_port" -serial)"
 hub_serial="$(certificate "$hub_host" "$hub_port" -serial)"
-renewed=0
-for _ in $(seq 1 60); do
+remaining() { # HOST PORT -> seconds until the served certificate expires
+  echo $(($(date -d "$(certificate "$1" "$2" -enddate | cut -d= -f2)" +%s) - $(date +%s)))
+}
+renewed=0 invoice_restarted=0 hub_restarted=0
+for _ in $(seq 1 90); do
   sleep 10
-  # A restart makes Caddy check its certificates at once instead of on its maintenance timer.
-  [[ "$(certificate "$invoice_host" "$invoice_port" -serial)" != "$invoice_serial" ]] ||
+  # Once inside the renewal window, one restart makes Caddy check its certificates
+  # at once instead of waiting for its maintenance timer.
+  if [[ "$invoice_restarted" == 0 && "$(remaining "$invoice_host" "$invoice_port")" -lt 280 ]]; then
     docker restart "$(https_container invoice-generator caddy)" >/dev/null
-  [[ "$(certificate "$hub_host" "$hub_port" -serial)" != "$hub_serial" ]] ||
+    invoice_restarted=1
+  fi
+  if [[ "$hub_restarted" == 0 && "$(remaining "$hub_host" "$hub_port")" -lt 280 ]]; then
     docker restart "$(https_container product-hub-https https)" >/dev/null
+    hub_restarted=1
+  fi
   if [[ "$(certificate "$invoice_host" "$invoice_port" -serial 2>/dev/null)" != "$invoice_serial" &&
     "$(certificate "$hub_host" "$hub_port" -serial 2>/dev/null)" != "$hub_serial" ]]; then
     renewed=1
     break
   fi
 done
-[[ "$renewed" == 1 ]] || fail 'certificates were not renewed'
+[[ "$renewed" == 1 ]] || fail "certificates were not renewed ($(certificate "$hub_host" "$hub_port" -enddate))"
 expect_trusted "$invoice_host" "$invoice_port"
 expect_trusted "$hub_host" "$hub_port"
 invoice_login

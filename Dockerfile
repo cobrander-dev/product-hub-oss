@@ -98,14 +98,16 @@ COPY scripts/backup.sh ./scripts/backup.sh
 COPY scripts/installer ./scripts/installer
 COPY scripts/release ./scripts/release
 COPY deploy ./deploy
-COPY compose.yaml compose.production.yaml compose.hard-delete.yaml compose.bootstrap.yaml compose.https.yaml ./
+COPY compose.yaml compose.production.yaml compose.hard-delete.yaml compose.bootstrap.yaml compose.https.yaml compose.https-relay.yaml compose.https-acme-ca.yaml ./
+COPY scripts/product-hub ./scripts/product-hub
 COPY docker/postgres/init-production ./docker/postgres/init-production
 
 RUN mkdir -p \
   /app/distribution-bundle/docker/postgres \
   /app/distribution-bundle/scripts/installer \
   /app/distribution-bundle/deploy \
-  && cp /app/compose.yaml /app/compose.production.yaml /app/compose.hard-delete.yaml /app/compose.bootstrap.yaml /app/compose.https.yaml /app/distribution-bundle/ \
+  && cp /app/compose.yaml /app/compose.production.yaml /app/compose.hard-delete.yaml /app/compose.bootstrap.yaml /app/compose.https.yaml /app/compose.https-relay.yaml /app/compose.https-acme-ca.yaml /app/distribution-bundle/ \
+  && cp /app/scripts/product-hub /app/distribution-bundle/scripts/product-hub \
   && cp -R /app/docker/postgres/init-production /app/distribution-bundle/docker/postgres/ \
   && cp /app/scripts/backup.sh /app/distribution-bundle/scripts/backup.sh \
   && cp /app/scripts/installer/backup-entrypoint.sh /app/distribution-bundle/scripts/installer/backup-entrypoint.sh \

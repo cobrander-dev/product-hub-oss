@@ -27,6 +27,16 @@ release_version=$(manifest_value version)
 printf '%s' "$migrator" | grep -Eq '^ghcr\.io/cobrander-dev/product-hub-oss-migrator@sha256:[0-9a-f]{64}$' || fail INVALID_MIGRATOR_DIGEST
 printf '%s' "$source_commit" | grep -Eq '^[0-9a-f]{40}$' || fail INVALID_SOURCE_COMMIT
 
+cli_path=${PRODUCT_HUB_CLI_PATH:-/usr/local/bin/product-hub}
+# Replaces the installed management command with the one shipped in the current
+# release bundle (bundles from before custom HTTPS ports do not carry one).
+install_current_cli() {
+  commit=$(awk -F= '$1 == "source_commit" { print $2 }' "$current_manifest")
+  shipped="$install_root/releases/$commit/bundle/scripts/product-hub"
+  [ -f "$shipped" ] || return 0
+  install -o root -g root -m 0755 "$shipped" "$cli_path"
+}
+
 command_name=${1:-}
 if [ -z "$command_name" ] && [ -t 0 ] && [ -t 1 ]; then
   printf '\nProduct Hub %s 管理菜单\n' "$release_version"
@@ -48,19 +58,54 @@ fi
 shift
 case "$command_name" in
   status | doctor | backup | update | logs | https | upgrade) ;;
+  https-apply) fail INVALID_COMMAND ;;
   *) fail INVALID_COMMAND ;;
 esac
 
+access="$install_root/config/access"
+access_value() { awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$access"; }
+
+# Host-side role decision for the shared port-80 certificate relay
+# (docs/HTTPS_PORTS.md). Sets relay_role and http_bind.
+decide_relay_role() {
+  holder=$(docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk '
+    { n = split($0, f, /[ ,]+/); for (i = 2; i <= n; i++) if (index(f[i], ":80->") && f[i] !~ /^127\./) { print $1; exit } }')
+  project=''
+  label=''
+  if [ -n "$holder" ]; then
+    project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$holder" 2>/dev/null || true)
+    label=$(docker inspect --format '{{index .Config.Labels "oss.https-relay"}}' "$holder" 2>/dev/null || true)
+  fi
+  if [ "$project" = product-hub-https ] ||
+    { [ -z "$holder" ] && [ -z "$(ss -H -ltn 'sport = :80' 2>/dev/null)" ]; }; then
+    relay_role=holder
+    http_bind=80
+    return 0
+  fi
+  if [ "$label" = holder ]; then relay_role=member; else relay_role=none; fi
+  http_bind=''
+  for candidate in $(seq 18080 18179); do
+    if [ -z "$(ss -H -ltnu "sport = :$candidate" 2>/dev/null)" ] &&
+      ! docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$candidate->"; then
+      http_bind="127.0.0.1:$candidate"
+      break
+    fi
+  done
+  [ -n "$http_bind" ] || fail NO_FREE_LOOPBACK_PORT
+}
+
 # Host-side certificate view for the optional built-in HTTPS proxy. Reads only
 # public certificate data; never prints keys or configuration secrets.
-if [ "$command_name" = https ]; then
-  access="$install_root/config/access"
+if [ "$command_name" = https ] && [ "${1:-}" != --apply ]; then
   [ -f "$access" ] || fail ACCESS_CONFIG_MISSING
-  host=$(awk -F= '$1 == "host" { print $2 }' "$access")
-  kind=$(awk -F= '$1 == "kind" { print $2 }' "$access")
+  host=$(access_value host)
+  kind=$(access_value kind)
+  port=$(access_value port)
+  port=${port:-443}
+  printf '%s' "$port" | grep -Eq '^[1-9][0-9]{0,4}$' || fail INVALID_ACCESS_CONFIG
   sni="-servername $host"
   [ "$kind" != ip ] || sni=-noservername
-  mode=$(awk -F= '$1 == "https" { print $2 }' "$access")
+  mode=$(access_value https)
   if [ "$mode" != builtin ]; then
     printf '未启用内置 HTTPS：应用监听 127.0.0.1:3000，由你自己的反向代理提供 HTTPS。\n'
     exit 0
@@ -68,17 +113,28 @@ if [ "$command_name" = https ]; then
   command -v openssl >/dev/null 2>&1 || fail OPENSSL_REQUIRED
   wait_seconds=${1:-0}
   printf '%s' "$wait_seconds" | grep -Eq '^[0-9]{1,3}$' || fail INVALID_WAIT_SECONDS
+  issuer=$(access_value issuer)
   certificate=''
   while :; do
-    certificate=$(printf '' | openssl s_client -connect 127.0.0.1:443 $sni 2>/dev/null |
+    # shellcheck disable=SC2086
+    certificate=$(printf '' | openssl s_client -connect "127.0.0.1:$port" $sni 2>/dev/null |
       openssl x509 -noout -issuer -enddate -fingerprint -sha256 2>/dev/null) || certificate=''
-    [ -n "$certificate" ] || [ "$wait_seconds" -le 0 ] || { sleep 5; wait_seconds=$((wait_seconds - 5)); continue; }
-    break
+    # Wait for an ACME certificate unless the local CA was chosen explicitly.
+    if [ -n "$certificate" ] && { [ "$issuer" = internal ] || ! printf '%s' "$certificate" | grep -q 'Caddy Local Authority'; }; then break; fi
+    [ "$wait_seconds" -gt 0 ] || break
+    sleep 5
+    wait_seconds=$((wait_seconds - 5))
   done
-  printf '访问地址: https://%s\n' "$host"
+  if [ "$port" = 443 ]; then origin="https://$host"; else origin="https://$host:$port"; fi
+  printf '访问地址: %s\n' "$origin"
+  case "$(access_value role)" in
+    holder) printf '证书验证: 本项目占用 80 端口，并为同一服务器上的其他项目转发\n' ;;
+    member) printf '证书验证: 由占用 80 端口的项目转发\n' ;;
+    none) [ "$port" = 443 ] && printf '证书验证: 仅 443 端口 TLS-ALPN\n' || printf '证书验证: 本机 CA\n' ;;
+  esac
   if [ -z "$certificate" ]; then
-    printf '证书尚未就绪（首次申请可能需要 1-2 分钟）。请确认防火墙已放行 TCP 80/443，稍后运行: product-hub https\n'
-    exit 0
+    printf '证书状态: 尚未获得证书（仍在申请中或申请失败）。请确认域名已解析到本服务器、防火墙已放行相应端口，稍后运行: product-hub https\n'
+    exit 1
   fi
   printf '%s\n' "$certificate"
   if printf '%s' "$certificate" | grep -q 'Caddy Local Authority'; then
@@ -89,10 +145,12 @@ if [ "$command_name" = https ]; then
     openssl x509 -noout -in "$root_cert.tmp" >/dev/null 2>&1 || fail LOCAL_ROOT_CERTIFICATE_INVALID
     chmod 0644 "$root_cert.tmp"
     mv "$root_cert.tmp" "$root_cert"
-    printf '\n当前使用自签名证书（自动申请公网证书未成功），浏览器会提示不安全。\n'
+    printf '\n证书状态: 本机 CA 证书（浏览器默认不信任，不是公网证书）。\n'
     printf '可将本机根证书导入你的电脑后正常访问；导入前请核对指纹:\n'
     openssl x509 -noout -fingerprint -sha256 -in "$root_cert"
     printf '根证书文件: %s\n' "$root_cert"
+  else
+    printf '证书状态: 已获得 ACME 证书，Caddy 会在到期前自动续期。\n'
   fi
   exit 0
 fi
@@ -119,7 +177,9 @@ if [ "$command_name" = upgrade ]; then
   printf '将先自动备份，再更新。是否继续？[y/N]: '
   IFS= read -r confirm
   case "$confirm" in y | Y | yes | YES) ;; *) exit 0 ;; esac
-  exec "$0" update
+  "$0" update
+  install_current_cli
+  exit 0
 fi
 
 runtime_base=/run
@@ -131,6 +191,20 @@ cleanup() {
   rm -rf "$docker_config"
 }
 trap cleanup EXIT HUP INT TERM
+
+relay_role=''
+http_bind=''
+if [ "$command_name" = https ]; then
+  # https --apply: decide the relay role on the host, then let the operator
+  # re-render the Caddyfile and recreate only the product-hub-https proxy.
+  [ "$#" -eq 1 ] || fail UNEXPECTED_ARGUMENT
+  [ -f "$access" ] || fail ACCESS_CONFIG_MISSING
+  [ "$(access_value https)" = builtin ] || fail BUILTIN_HTTPS_NOT_ENABLED
+  command -v ss >/dev/null 2>&1 || fail PORT_CHECK_REQUIRES_IPROUTE2
+  decide_relay_role
+  command_name=https-apply
+  set --
+fi
 
 is_check=0
 expect_manifest_path=0
@@ -185,6 +259,7 @@ fi
 [ -d "$repository_root" ] || fail RELEASE_BUNDLE_MISSING
 tty_flag=-i
 if [ -t 0 ] && [ -t 1 ]; then tty_flag=-it; fi
+status=0
 docker run --rm "$tty_flag" \
   --user 0:0 \
   --read-only \
@@ -204,5 +279,12 @@ docker run --rm "$tty_flag" \
   --env PRODUCT_HUB_CONTROL_CONTAINER=1 \
   --env PRODUCT_HUB_REPOSITORY_ROOT="$repository_root" \
   --env PRODUCT_HUB_RELEASE_REVISION="$source_commit" \
+  --env PRODUCT_HUB_RELAY_ROLE="$relay_role" \
+  --env PRODUCT_HUB_HTTP_BIND="$http_bind" \
   "$migrator" \
-  node /app/node_modules/tsx/dist/cli.mjs /app/scripts/installer/operator-cli.ts "$command_name" "$@"
+  node /app/node_modules/tsx/dist/cli.mjs /app/scripts/installer/operator-cli.ts "$command_name" "$@" || status=$?
+if [ "$command_name" = https-apply ] && [ "$status" -eq 0 ]; then
+  install_current_cli
+  printf '已按当前服务器情况重新配置证书验证（%s），数据、端口和证书未改动。\n' "$relay_role"
+fi
+exit "$status"

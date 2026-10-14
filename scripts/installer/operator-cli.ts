@@ -30,11 +30,17 @@ import {
 } from "./config";
 import {
   httpsEnabled,
+  httpsPaths,
   httpsStatus,
   parseAccessHost,
+  parseHttpsSettings,
+  publicOrigin,
+  readAccessFile,
+  renderAccessFile,
   startHttps,
   writeCaddyfile,
   type AccessHost,
+  type HttpsSettings,
 } from "./https";
 import { hiddenInput } from "./tty";
 import {
@@ -140,10 +146,16 @@ function secret() {
   return randomBytes(48).toString("base64url");
 }
 
-export function renderSourceEnvironment(domain: string, root = rootPath()) {
-  const auth = `https://${domain}`;
+// The public origin carries a non-standard HTTPS port, and APP_DOMAIN is then
+// host:port so Host, X-Forwarded-Host and Origin are matched exactly.
+export function renderSourceEnvironment(
+  domain: string,
+  root = rootPath(),
+  port = 443,
+) {
+  const auth = publicOrigin(domain, port);
   const fields = {
-    APP_DOMAIN: domain,
+    APP_DOMAIN: new URL(auth).host,
     BETTER_AUTH_URL: auth,
     BETTER_AUTH_TRUSTED_ORIGINS: auth,
     BETTER_AUTH_SECRET: secret(),
@@ -259,12 +271,17 @@ async function setup(manifestPath: string) {
   const manifest = parseReleaseManifest(readFileSync(manifestPath, "utf8"));
   const paths = installationPaths(manifest);
   const access = await askAccessHost();
-  const builtinHttps = await askBuiltinHttps(access);
+  const settings = askBuiltinHttps(access);
+  const builtinHttps = settings !== undefined;
   const domain = access.host;
   pullAndVerify(manifest);
   installSoftwareBundle(manifest);
   prepareDirectories(paths);
-  atomicWrite(paths.env, renderSourceEnvironment(domain, paths.root), 0o600);
+  atomicWrite(
+    paths.env,
+    renderSourceEnvironment(domain, paths.root, settings?.port),
+    0o600,
+  );
   const config = configureEnvironment(manifest, false);
   const installation = loadInstallation(config);
   await install(installation);
@@ -290,25 +307,32 @@ async function setup(manifestPath: string) {
     })
     .parse({ username, name, password });
   process.stdout.write(bootstrapAdmin(installation, identity) + "\n");
-  writeProxySnippets(manifest, config.domain, config.appPort);
-  if (builtinHttps) {
-    writeCaddyfile(paths.root, access);
+  writeProxySnippets(manifest, access.host, config.appPort);
+  if (settings) {
+    writeCaddyfile(paths.root, access, settings);
+    const pem = process.env.PRODUCT_HUB_ACME_CA_ROOT_PEM || "";
+    if (settings.acmeCa) {
+      demand(pem.includes("BEGIN CERTIFICATE"), "ACME_CA_ROOT_REQUIRED");
+      atomicWrite(httpsPaths(paths.root).acmeCaRoot, pem.trim() + "\n", 0o644);
+    }
     startHttps({
       root: paths.root,
       bundle: paths.bundle,
       runnerImage: manifest.images.runner,
       projectName: config.projectName,
+      access,
+      settings,
     });
   }
   atomicWrite(
     join(paths.config, "access"),
-    `host=${access.host}\nkind=${access.kind}\nhttps=${builtinHttps ? "builtin" : "external"}\n`,
+    renderAccessFile(access, builtinHttps, settings),
     0o644,
   );
   promoteManifest(manifest);
   process.stdout.write(
-    builtinHttps
-      ? `PASS: setup complete\n安装完成。访问地址: https://${access.host}\n`
+    settings
+      ? `PASS: setup complete\n安装完成。访问地址: ${publicOrigin(access.host, settings.port)}\n`
       : `PASS: setup complete\n安装完成。应用仅监听 127.0.0.1:${config.appPort}，请按 ${paths.proxy} 中的示例配置你自己的 HTTPS 反向代理。\n`,
   );
 }
@@ -327,19 +351,42 @@ async function askAccessHost(): Promise<AccessHost> {
   return parseAccessHost(answer || suggested);
 }
 
-async function askBuiltinHttps(access: AccessHost) {
-  if (process.env.PRODUCT_HUB_HTTPS_PORTS !== "free") {
-    process.stdout.write(
-      "检测到 80/443 端口已被占用，将不启用内置 HTTPS；安装后请用现有的 Nginx/Caddy 反向代理。\n",
-    );
+// The port and the certificate path were chosen on the host by setup.sh, which
+// can see host ports; only the access-kind specific rules are applied here.
+export function askBuiltinHttps(
+  access: AccessHost,
+  env: Record<string, string | undefined> = process.env,
+): HttpsSettings | undefined {
+  if (env.PRODUCT_HUB_HTTPS_MODE === "external") {
     demand(access.kind === "domain", "IP_ACCESS_REQUIRES_BUILTIN_HTTPS");
-    return false;
+    process.stdout.write(
+      "不启用内置 HTTPS；安装后请用现有的 Nginx/Caddy 反向代理。\n",
+    );
+    return undefined;
   }
-  if (access.kind === "ip") return true;
-  const answer = await question(
-    "是否启用内置 HTTPS（自动申请并续期证书，占用 80/443 端口）？[Y/n]: ",
-  );
-  return !/^n(o)?$/i.test(answer);
+  demand(env.PRODUCT_HUB_HTTPS_MODE === "builtin", "HTTPS_MODE_REQUIRED");
+  let settings = parseHttpsSettings({
+    port: env.PRODUCT_HUB_HTTPS_PORT,
+    httpBind: env.PRODUCT_HUB_HTTP_BIND,
+    role: env.PRODUCT_HUB_RELAY_ROLE,
+    issuer: env.PRODUCT_HUB_TLS_ISSUER,
+    acmeCa: env.PRODUCT_HUB_ACME_CA,
+  });
+  // The shared port-80 relay routes by hostname, so IP access cannot use it.
+  if (access.kind === "ip" && settings.role === "member")
+    settings = { ...settings, role: "none" };
+  if (
+    access.kind === "ip" &&
+    settings.role === "none" &&
+    settings.port !== 443 &&
+    settings.issuer !== "internal"
+  ) {
+    process.stdout.write(
+      "IP 访问使用自定义端口且 80 端口不可用：无法自动申请公网证书，将使用本机 CA 证书（浏览器会提示不受信任，可通过 product-hub https 导出根证书）。\n",
+    );
+    settings = { ...settings, issuer: "internal" };
+  }
+  return settings;
 }
 
 function loadCurrent() {
@@ -510,17 +557,64 @@ async function update(args: string[]) {
     await updateInstallation(installation);
     await doctor(installation);
     // Keep the optional proxy on the same verified Runner digest as the App.
-    if (httpsEnabled(current.paths.root))
+    // Installations with custom-port settings get the current Caddyfile
+    // template; older ones keep their file and the 80/443 defaults.
+    if (httpsEnabled(current.paths.root)) {
+      const recorded = readAccessFile(current.paths.root);
+      if (recorded?.settings)
+        writeCaddyfile(current.paths.root, recorded.access, recorded.settings);
       startHttps({
         root: current.paths.root,
         bundle: targetPaths.bundle,
         runnerImage: target.images.runner,
         projectName: config.projectName,
+        access: recorded?.settings ? recorded.access : undefined,
+        settings: recorded?.settings,
       });
+    }
     promoteManifest(target);
   } finally {
     rmSync(lock, { recursive: true, force: false });
   }
+}
+
+// Re-decides certificate validation for the current server (role and port-80
+// binding computed on the host by scripts/product-hub) and recreates only the
+// product-hub-https proxy. Port, access host, data and certificates are kept.
+function httpsApply(current: ReturnType<typeof loadCurrent>) {
+  demand(process.getuid?.() === 0, "ROOT_REQUIRED");
+  const recorded = readAccessFile(current.paths.root);
+  demand(recorded?.builtin, "BUILTIN_HTTPS_NOT_ENABLED");
+  let settings = parseHttpsSettings({
+    port: String(recorded.settings?.port ?? 443),
+    httpBind: process.env.PRODUCT_HUB_HTTP_BIND,
+    role: process.env.PRODUCT_HUB_RELAY_ROLE,
+    issuer: recorded.settings?.issuer ?? "auto",
+    acmeCa: recorded.settings?.acmeCa,
+  });
+  if (recorded.access.kind === "ip" && settings.role === "member")
+    settings = { ...settings, role: "none" };
+  demand(
+    !(settings.role === "none" && settings.port !== 443) ||
+      settings.issuer === "internal",
+    "ACME_HTTP_PORT_UNAVAILABLE",
+  );
+  writeCaddyfile(current.paths.root, recorded.access, settings);
+  startHttps({
+    root: current.paths.root,
+    bundle: current.paths.bundle,
+    runnerImage: current.manifest.images.runner,
+    projectName: current.config.projectName,
+    access: recorded.access,
+    settings,
+    recreate: true,
+  });
+  atomicWrite(
+    join(current.paths.config, "access"),
+    renderAccessFile(recorded.access, true, settings),
+    0o644,
+  );
+  process.stdout.write(`HTTPS_ROLE=${settings.role}\n`);
 }
 
 async function main() {
@@ -557,6 +651,16 @@ async function main() {
     );
   } else if (command === "update") {
     await update(args);
+  } else if (command === "https-apply") {
+    demand(args.length === 0, "UNEXPECTED_ARGUMENT");
+    httpsApply(current);
+  } else if (command === "https-settings") {
+    demand(args.length === 0, "UNEXPECTED_ARGUMENT");
+    const recorded = readAccessFile(current.paths.root);
+    const settings = recorded?.settings;
+    process.stdout.write(
+      `PORT=${settings?.port ?? 443}\nROLE=${settings?.role ?? ""}\nISSUER=${settings?.issuer ?? "auto"}\n`,
+    );
   } else if (command === "logs") {
     let service: "app" | "postgres" | "hard-delete-worker" = "app";
     let lines = 100;

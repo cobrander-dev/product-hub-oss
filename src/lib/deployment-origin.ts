@@ -5,9 +5,10 @@ const productionDomain = z
   .trim()
   .min(1)
   .max(253)
+  // A literal IPv4 address is the host of installs without a domain.
   .regex(
-    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::(?:[1-9][0-9]{0,4}))?$/i,
-    "APP_DOMAIN must be a DNS hostname with an optional port.",
+    /^(?:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}|(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))(?::(?:[1-9][0-9]{0,4}))?$/i,
+    "APP_DOMAIN must be a DNS hostname or IPv4 address with an optional port.",
   )
   .refine((value) => !value.includes("*"), "Wildcards are not allowed.");
 

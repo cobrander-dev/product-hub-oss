@@ -43,12 +43,118 @@ fi
 command -v ss >/dev/null 2>&1 || fail PORT_CHECK_REQUIRES_IPROUTE2
 listeners=$(ss -H -ltn 'sport = :3000' 2>/dev/null) || fail PORT_CHECK_FAILED
 [ -z "$listeners" ] || fail APP_PORT_IN_USE '本机 3000 端口已被占用。'
-# The optional built-in HTTPS proxy needs both public web ports.
-https_ports=free
-for web_port in 80 443; do
-  web_listeners=$(ss -H -ltn "sport = :$web_port" 2>/dev/null) || fail PORT_CHECK_FAILED
-  [ -z "$web_listeners" ] || https_ports=busy
+# ---- Built-in HTTPS port and certificate validation (docs/HTTPS_PORTS.md) ----
+# Prompts read /dev/tty; without a terminal the preset or default answer is used.
+tty_say() { { printf '%s' "$1" >/dev/tty; } 2>/dev/null || true; }
+tty_ask() {
+  tty_say "$1"
+  answer=''
+  { IFS= read -r answer </dev/tty; } 2>/dev/null || answer=''
+  printf '%s' "$answer"
+}
+port_published() { docker ps --format '{{.Ports}}' 2>/dev/null | grep -Eq "(^|[ ,])[^ ,]*:$1->"; }
+port_busy() {
+  listeners=$(ss -H -ltnu "sport = :$1" 2>/dev/null) || fail PORT_CHECK_FAILED
+  [ -n "$listeners" ] || port_published "$1"
+}
+port_owner() {
+  owner=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null |
+    awk -v p=":$1->" 'index($0, p) { printf "%s容器 %s", sep, $1; sep = "、" }')
+  [ -n "$owner" ] || owner=$(ss -H -ltnup "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n 1 | cut -d'"' -f2)
+  printf '%s' "${owner:-未知程序}"
+}
+# Container publishing host port $1 on a non-loopback address (first match).
+port_container() {
+  docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk -v p=":$1->" '
+    { n = split($0, f, /[ ,]+/); for (i = 2; i <= n; i++) if (index(f[i], p) && f[i] !~ /^127\./) { print $1; exit } }'
+}
+valid_https_port() {
+  printf '%s' "$1" | grep -Eq '^[1-9][0-9]{0,4}$' || return 1
+  [ "$1" -eq 443 ] || { [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }
+}
+
+https_mode=builtin
+https_port=${PRODUCT_HUB_HTTPS_PORT:-}
+preset_port=0
+[ -z "$https_port" ] || preset_port=1
+while :; do
+  if [ -z "$https_port" ]; then
+    tty_say "
+请选择 HTTPS 端口：
+  · 直接回车使用 443（标准端口，访问地址不带端口号）
+  · 同一台服务器安装多个项目时，可输入其他端口，例如 8443、9443
+  · 输入 p：改用服务器上已有的反向代理（Nginx/Caddy，仅限域名）
+"
+    https_port=$(tty_ask 'HTTPS 端口 [443]: ')
+    https_port=${https_port:-443}
+  fi
+  case "$https_port" in p | P) https_mode=external; break ;; esac
+  if ! valid_https_port "$https_port"; then
+    [ "$preset_port" -eq 0 ] || fail HTTPS_PORT_INVALID 'HTTPS 端口需为 443 或 1024-65535；80 保留给 HTTP 和证书验证。'
+    tty_say "无效的端口：$https_port（可用 443 或 1024-65535）。
+"
+    https_port=''
+    continue
+  fi
+  if port_busy "$https_port"; then
+    [ "$preset_port" -eq 0 ] || fail HTTPS_PORT_IN_USE "端口 $https_port 已被占用（$(port_owner "$https_port")）。不会停止或修改占用它的程序，请换一个端口。"
+    tty_say "端口 $https_port 已被占用（$(port_owner "$https_port")）。不会停止或修改占用它的程序，请换一个端口。
+"
+    https_port=''
+    continue
+  fi
+  break
 done
+
+relay_role=''
+http_bind=80
+tls_issuer=${PRODUCT_HUB_TLS_ISSUER:-auto}
+case "$tls_issuer" in auto | internal) ;; *) fail INVALID_TLS_ISSUER ;; esac
+if [ "$https_mode" = builtin ]; then
+  holder=$(port_container 80)
+  if [ -z "$holder" ] && ! port_busy 80; then
+    relay_role=holder
+    printf '80 端口空闲：使用 80 端口完成证书验证，并为同一服务器上的其他项目转发验证请求。\n'
+  elif [ -n "$holder" ] &&
+    [ "$(docker inspect --format '{{index .Config.Labels "oss.https-relay"}}' "$holder" 2>/dev/null)" = holder ]; then
+    relay_role=member
+    printf '80 端口由同一服务器上的另一个项目（%s）提供，证书验证请求由它转发到本项目（仅限域名访问）。\n' "$(port_owner 80)"
+  else
+    relay_role=none
+    if [ "$https_port" -eq 443 ]; then
+      printf '80 端口被其他程序占用（%s），将只通过 443 端口完成证书验证（TLS-ALPN-01）。\n' "$(port_owner 80)"
+    elif [ "$tls_issuer" != internal ]; then
+      printf '无法自动申请受信任的 HTTPS 证书：\n'
+      printf '  · 公网证书机构只在 80 端口（HTTP-01）或 443 端口（TLS-ALPN-01）验证域名\n'
+      printf '  · 80 端口已被其他程序占用（%s），本项目使用的是 %s 端口\n' "$(port_owner 80)" "$https_port"
+      printf '  · DNS-01 验证需要 DNS 服务商 API 凭据，本安装程序不支持\n'
+      tty_say '请选择：
+  1) 使用本机 CA 证书（浏览器会提示不受信任，可导入根证书后使用）
+  2) 改用已有反向代理模式（仅限域名）
+  3) 取消安装
+'
+      case "$(tty_ask '请输入 1/2/3 [3]: ')" in
+        1) tls_issuer=internal ;;
+        2) https_mode=external relay_role='' ;;
+        *) fail ACME_HTTP_PORT_UNAVAILABLE '已取消，没有做任何更改。' ;;
+      esac
+    fi
+  fi
+  if [ -n "$relay_role" ] && [ "$relay_role" != holder ]; then
+    # Caddy still listens on container port 80 for relayed challenges; loopback only.
+    http_bind=''
+    for candidate in $(seq 18080 18179); do
+      port_busy "$candidate" || { http_bind="127.0.0.1:$candidate"; break; }
+    done
+    [ -n "$http_bind" ] || fail NO_FREE_LOOPBACK_PORT
+  fi
+fi
+acme_ca=${PRODUCT_HUB_ACME_CA:-}
+acme_ca_root_pem=''
+if [ -n "$acme_ca" ]; then
+  [ -f "${PRODUCT_HUB_ACME_CA_ROOT:-}" ] || fail ACME_CA_ROOT_REQUIRED
+  acme_ca_root_pem=$(cat "$PRODUCT_HUB_ACME_CA_ROOT")
+fi
 # Prefer the public IP found by install.sh; otherwise the default-route source.
 suggested_ip=${PRODUCT_HUB_SUGGESTED_IP:-}
 if [ -z "$suggested_ip" ] && command -v ip >/dev/null 2>&1; then
@@ -137,7 +243,13 @@ run_control() {
     --env PRODUCT_HUB_CONTROL_CONTAINER=1 \
     --env PRODUCT_HUB_REPOSITORY_ROOT="$repository_root" \
     --env PRODUCT_HUB_RELEASE_REVISION="$source_commit" \
-    --env PRODUCT_HUB_HTTPS_PORTS="$https_ports" \
+    --env PRODUCT_HUB_HTTPS_MODE="$https_mode" \
+    --env PRODUCT_HUB_HTTPS_PORT="$https_port" \
+    --env PRODUCT_HUB_HTTP_BIND="$http_bind" \
+    --env PRODUCT_HUB_RELAY_ROLE="$relay_role" \
+    --env PRODUCT_HUB_TLS_ISSUER="$tls_issuer" \
+    --env PRODUCT_HUB_ACME_CA="$acme_ca" \
+    --env PRODUCT_HUB_ACME_CA_ROOT_PEM="$acme_ca_root_pem" \
     --env PRODUCT_HUB_SUGGESTED_IP="$suggested_ip" \
     "$migrator" \
     node /app/node_modules/tsx/dist/cli.mjs /app/scripts/installer/operator-cli.ts setup --manifest /release.manifest
@@ -150,9 +262,14 @@ printf 'PASS: Product Hub installed.\n'
 step 5 '安装成功'
 access_host=$(awk -F= '$1 == "host" { print $2 }' "$install_root/config/access" 2>/dev/null) || access_host=''
 if grep -qx 'https=builtin' "$install_root/config/access" 2>/dev/null; then
-  printf '访问地址：https://%s\n' "$access_host"
   printf '\n正在等待 HTTPS 证书（最长约 2 分钟）...\n'
   "$cli_path" https 120 || true
+  if [ "$relay_role" = holder ]; then
+    printf '云服务器请在安全组/防火墙中放行 TCP 80 和 TCP %s。\n' "$https_port"
+  else
+    printf '云服务器请在安全组/防火墙中放行 TCP %s。\n' "$https_port"
+  fi
+  [ "$relay_role" != member ] || printf '证书续期依赖占用 80 端口的项目保持运行。\n'
 else
   printf '应用监听 127.0.0.1:3000，访问域名：%s（由你自己的反向代理提供 HTTPS）。\n' "$access_host"
   printf '反向代理示例已生成在 %s/proxy，未自动应用。\n' "$install_root"

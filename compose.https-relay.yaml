@@ -1,0 +1,18 @@
+# Shared port-80 relay between self-hosted projects on one server
+# (docs/HTTPS_PORTS.md). The proxy joins the external network oss-https-relay
+# as <hostname>.acme-relay.invalid and is labelled with its role, so the project
+# that owns host port 80 can pass ACME HTTP-01 challenges for other hostnames to
+# the right proxy. Only the HTTPS proxy joins; App and PostgreSQL never do.
+services:
+  https:
+    labels:
+      oss.https-relay: ${PRODUCT_HUB_RELAY_ROLE:?relay role is required}
+    networks:
+      oss_https_relay:
+        aliases:
+          - ${PRODUCT_HUB_RELAY_ALIAS:?relay alias is required}
+
+networks:
+  oss_https_relay:
+    name: oss-https-relay
+    external: true

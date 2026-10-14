@@ -204,4 +204,6 @@ Control container 在 drop ALL 后仅增加 CHOWN 与 DAC_READ_SEARCH，以创�
 
 一键安装可选择内置 HTTPS：独立 Compose 项目 `product-hub-https` 复用与 App 相同、已扫描并 attestation 的 Runner digest 中的 Caddy（官方 tag 源码、补丁版 Go 构建），以 UID 1001、只读根文件系统、`cap_drop: ALL`、no-new-privileges 运行，只加入 App frontend 网络，不能访问 backend/PostgreSQL 网络；admin API 关闭，配置文件只读挂载且不含密钥。代理设置 12 MB 请求体上限与读写超时；HSTS 仅在域名模式发送。
 
-无域名时 `APP_DOMAIN` 为公网 IPv4，`BETTER_AUTH_URL` 仍必须是同 Host 的 HTTPS origin。证书先向 Let's Encrypt 申请 `shortlived` IP 证书，失败则由 Caddy 本机 CA 签发，任何情况下都不以明文 HTTP 提供登录。本机 CA 模式下，管理员通过 `product-hub https` 获取根证书与 SHA-256 指纹，带外核对后导入客户端，不得指导用户忽略证书错误。回环、未指定、链路本地、组播与广播地址不能作为访问主机。80/443 被占用时不启用内置 HTTPS，IP 模式随之拒绝安装。
+无域名时 `APP_DOMAIN` 为公网 IPv4，`BETTER_AUTH_URL` 仍必须是同 Host 的 HTTPS origin。证书先向 Let's Encrypt 申请 `shortlived` IP 证书，失败则由 Caddy 本机 CA 签发，任何情况下都不以明文 HTTP 提供登录。本机 CA 模式下，管理员通过 `product-hub https` 获取根证书与 SHA-256 指纹，带外核对后导入客户端，不得指导用户忽略证书错误。回环、未指定、链路本地、组播与广播地址不能作为访问主机。所选 HTTPS 端口被占用时不得接管，只能换端口或使用现有反向代理（IP 模式不支持现有反向代理）。
+
+自定义 HTTPS 端口时 origin 含端口，Host、X-Forwarded-Host 与 Origin 必须与 `host:port` 精确一致。浏览器 Cookie 不按端口隔离：同一主机名不同端口的其他项目能读取本项目 Cookie（名称不同，不会覆盖），因此多项目共存时推荐每个项目使用独立子域名。共享 80 端口转发（`docs/HTTPS_PORTS.md`）只转发明文 HTTP（ACME HTTP-01 与跳转），目标限定为 `*.acme-relay.invalid`，带防重复转发头；转发网络只连接各项目的 HTTPS 代理，不连接 App 或 PostgreSQL。

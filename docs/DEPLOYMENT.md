@@ -125,4 +125,14 @@ Hard Delete 只覆盖当前 PostgreSQL 与当前 uploads。历史 backup 和运�
 
 首次安装在任何写入前检查 `/opt/product-hub`、CLI、Compose project/containers/volumes/network 与 port。通过后由固定 Migrator digest 的一次性 control container 调用既有 bootstrap。安装只生成 Caddy/Nginx snippet，不安装、覆盖、reload 或 restart reverse proxy。
 
+### 11.1 Built-in HTTPS port and certificate validation
+
+安装向导询问 HTTPS 端口：默认 443，也允许 1024–65535；80 保留给 HTTP 与证书验证。所选端口（TCP/UDP 监听或 Docker 发布）已被占用时只报告占用者并要求换端口，不停止、不覆盖、不修改任何其他程序或 Compose project。输入 `p` 选择现有反向代理模式（仅域名）。
+
+端口不是 443 时，`APP_DOMAIN` 为 `host:port`，`BETTER_AUTH_URL` 与唯一的 `BETTER_AUTH_TRUSTED_ORIGINS` 为 `https://host:port`；运行时 Host/X-Forwarded-Host/Origin 精确匹配同一 host:port。
+
+ACME 只在 80（HTTP-01）或 443（TLS-ALPN-01）验证，DNS-01 不支持。同一服务器多个自托管项目按 `docs/HTTPS_PORTS.md` 共享 80 端口：80 空闲时本项目代理发布 80（holder），并通过外部 Docker 网络 `oss-https-relay` 把其他主机名的明文 HTTP 转发给 `<hostname>.acme-relay.invalid`；80 由带 `oss.https-relay=holder` 标签的代理占用时不发布 80（member）。80 由无关程序占用时：443 只用 TLS-ALPN-01；其他端口无法获得受信任证书，安装程序必须说明原因并要求明确选择本机 CA、现有反向代理或取消。安装后读取实际提供的证书并如实报告签发者，不得把未完成的申请报告为成功。
+
+`config/access` 记录 `port`、`http_bind`、`role`、`issuer`。没有这些字段的旧安装保持 80/443 与原 Caddyfile；`product-hub https --apply` 只重建 `product-hub-https` 代理以加入转发约定，不修改数据、端口或证书。
+
 routine CLI 只提供 `status`、`doctor`、`backup`、`update`、`update --check` 与 bounded `logs`。Update 固定顺序是 lock → current doctor → target manifest/digest/amd64/revision → fresh verified backup → pending migrations/grants → Worker → App → doctor/health；禁止由该命令改变 PostgreSQL digest 或 lifecycle。

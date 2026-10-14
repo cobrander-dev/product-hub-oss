@@ -1,0 +1,81 @@
+name: HTTPS ports and multi-project install
+
+# Installer checks for custom HTTPS ports. The end-to-end jobs install Product Hub
+# (built from this commit) and Invoice Generator (its public main branch) side by
+# side on a disposable runner; nothing is published.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test:installer-stage2
+      - run: pnpm test:installer-foundation
+      - run: pnpm test:distribution
+      - name: ShellCheck installer scripts
+        run: shellcheck -S warning setup.sh install.sh scripts/product-hub tests/https-ports/multi-project-e2e.sh
+      - name: Validate rendered Caddyfiles with Caddy 2.11
+        run: |
+          mkdir -p "$RUNNER_TEMP/caddy"
+          node node_modules/tsx/dist/cli.mjs tests/https-ports/render-caddyfiles.ts "$RUNNER_TEMP/caddy"
+          for file in "$RUNNER_TEMP"/caddy/*; do
+            docker run --rm -v "$file:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine \
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          done
+
+  multi-project:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [invoice-first, hub-first]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: product-hub
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: cobrander-dev/invoice-generator-oss
+          ref: main
+          path: invoice-generator
+          persist-credentials: false
+      - name: Free disk space for three image builds per release
+        run: sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/share/dotnet /opt/ghc
+      - name: Two projects, own ports, shared port-80 certificate relay (${{ matrix.scenario }})
+        run: sudo -E INVOICE_DIR="$GITHUB_WORKSPACE/invoice-generator" product-hub/tests/https-ports/multi-project-e2e.sh ${{ matrix.scenario }}
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo docker ps -a
+          sudo docker logs ci-pebble 2>&1 | tail -n 60 || true
+          for project in invoice-generator product-hub-https; do
+            for id in $(sudo docker ps -aq --filter label=com.docker.compose.project=$project); do
+              sudo docker logs "$id" 2>&1 | tail -n 60
+            done
+          done
+          sudo cat /opt/invoice-generator/config/installer.env /opt/invoice-generator/config/Caddyfile || true
+          sudo cat /opt/product-hub/config/access /opt/product-hub/config/https/Caddyfile || true

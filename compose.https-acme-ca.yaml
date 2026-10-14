@@ -1,0 +1,9 @@
+# Private ACME directory (isolated tests or an internal CA): its root
+# certificate, readable by the non-root proxy, is mounted read-only.
+services:
+  https:
+    volumes:
+      - type: bind
+        source: ${PRODUCT_HUB_ACME_CA_ROOT:?ACME CA root is required}
+        target: /etc/caddy/acme-ca-root.pem
+        read_only: true

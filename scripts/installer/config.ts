@@ -101,10 +101,9 @@ const domainPattern =
 function validateOrigin(domain: string, authUrl: string, trusted: string) {
   // A literal IPv4 host is allowed for installs without a domain; it is still
   // served only over HTTPS (ACME IP certificate or the local-CA fallback).
-  if (
-    !(domainPattern.test(domain) || isIP(domain) === 4) ||
-    domain.includes("*")
-  )
+  // An optional :port follows a non-standard built-in HTTPS port.
+  const ipv4 = /^(.+?)(?::[1-9][0-9]{0,4})?$/.exec(domain)?.[1] ?? "";
+  if (!(domainPattern.test(domain) || isIP(ipv4) === 4) || domain.includes("*"))
     reject("INVALID_APP_DOMAIN");
   let parsed: URL;
   try {

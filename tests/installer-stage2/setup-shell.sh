@@ -19,6 +19,9 @@ EOF
 cat >"$bin/ss" <<'EOF'
 #!/bin/sh
 [ "${FAKE_PORT_CHECK_FAIL:-0}" = 0 ] || exit 1
+for port in ${FAKE_BUSY_PORTS:-}; do
+  case " $* " in *":$port "*) echo "LISTEN 0 511 0.0.0.0:$port 0.0.0.0:* users:((\"nginx\",pid=1,fd=6))" ;; esac
+done
 exit 0
 EOF
 cat >"$bin/install" <<'EOF'
@@ -200,4 +203,36 @@ for case in \
   fi
 done
 
+# HTTPS port: a busy port is never taken over, and a custom port without
+# usable port 80 needs an explicit local-CA choice (no terminal = cancel).
+run_port_case() {
+  case_log="$test_root/https-$1.log"
+  : >"$case_log"
+  case_name=$1
+  shift
+  env PRODUCT_HUB_ROOT="$test_root/https-root-$case_name" \
+    PRODUCT_HUB_CLI_PATH="$test_root/https-cli-$case_name" \
+    PRODUCT_HUB_RELEASE_MANIFEST="$manifest" FAKE_DOCKER_LOG="$case_log" \
+    PATH="$bin:$PATH" "$@" sh "$project_dir/setup.sh" >"$case_log.out" 2>&1
+}
+! run_port_case busy PRODUCT_HUB_HTTPS_PORT=8443 FAKE_BUSY_PORTS=8443
+grep -F 'HTTPS_PORT_IN_USE' "$test_root/https-busy.log.out" >/dev/null
+! grep -E '(^| )pull |(^| )run ' "$test_root/https-busy.log" >/dev/null
+! run_port_case invalid PRODUCT_HUB_HTTPS_PORT=80
+grep -F 'HTTPS_PORT_INVALID' "$test_root/https-invalid.log.out" >/dev/null
+! run_port_case noacme PRODUCT_HUB_HTTPS_PORT=9443 FAKE_BUSY_PORTS=80
+grep -F 'ACME_HTTP_PORT_UNAVAILABLE' "$test_root/https-noacme.log.out" >/dev/null
+grep -F 'DNS-01' "$test_root/https-noacme.log.out" >/dev/null
+! grep -E '(^| )pull |(^| )run ' "$test_root/https-noacme.log" >/dev/null
+run_port_case internal PRODUCT_HUB_HTTPS_PORT=9443 FAKE_BUSY_PORTS=80 PRODUCT_HUB_TLS_ISSUER=internal
+grep -F 'PRODUCT_HUB_HTTPS_PORT=9443' "$test_root/https-internal.log" >/dev/null
+grep -F 'PRODUCT_HUB_RELAY_ROLE=none' "$test_root/https-internal.log" >/dev/null
+grep -F 'PRODUCT_HUB_HTTP_BIND=127.0.0.1:18080' "$test_root/https-internal.log" >/dev/null
+grep -F 'PRODUCT_HUB_TLS_ISSUER=internal' "$test_root/https-internal.log" >/dev/null
+run_port_case holder PRODUCT_HUB_HTTPS_PORT=9443 FAKE_BUSY_PORTS=443
+grep -F 'PRODUCT_HUB_RELAY_ROLE=holder' "$test_root/https-holder.log" >/dev/null
+grep -F 'PRODUCT_HUB_HTTP_BIND=80 ' "$test_root/https-holder.log" >/dev/null
+grep -F 'PRODUCT_HUB_HTTPS_MODE=builtin' "$test_root/https-holder.log" >/dev/null
+
+echo 'PASS: HTTPS port selection, busy-port refusal and explicit certificate choice'
 echo 'PASS: setup and CLI verification contract, formal-release promotion identity, shell preflight, existing-install stop, image identity rejection, and control-container hardening'

@@ -17,9 +17,11 @@ services:
       XDG_CONFIG_HOME: /tmp/caddy-config
     # Docker sets net.ipv4.ip_unprivileged_port_start=0 in the container
     # network namespace, so the non-root process binds 80/443 without caps.
+    # Defaults are the original 80/443 layout (older CLIs set no port); custom
+    # HTTPS ports and a loopback-only port 80 come from config/access.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${PRODUCT_HUB_HTTP_BIND:-80}:80"
+      - "${PRODUCT_HUB_HTTPS_PORT:-443}:443"
     volumes:
       - type: bind
         source: ${PRODUCT_HUB_CADDYFILE:?generated Caddyfile is required}

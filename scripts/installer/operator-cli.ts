@@ -401,12 +401,20 @@ function loadCurrent() {
   return { manifest, paths, config, installation: loadInstallation(config) };
 }
 
+// The one-shot backup container mounts the host backup root at /backups and
+// prints the set directory as it sees it; map that back to the host path.
+const containerBackupRoot = "/backups";
 export function verifyBackupResult(output: string, backupRoot: string) {
-  const path = output
+  let path = output
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.startsWith("/"))
     .at(-1);
+  if (path?.startsWith(containerBackupRoot + "/")) {
+    const name = path.slice(containerBackupRoot.length + 1);
+    demand(/^product-hub-[0-9TZ]+-[0-9a-f]{40}$/.test(name), "BACKUP_PATH");
+    path = join(resolve(backupRoot), name);
+  }
   demand(path && path.startsWith(resolve(backupRoot) + sep), "BACKUP_PATH");
   const stat = lstatSync(path);
   demand(stat.isDirectory() && !stat.isSymbolicLink(), "BACKUP_DIRECTORY");

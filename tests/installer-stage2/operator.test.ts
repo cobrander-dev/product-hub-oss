@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { BootstrapFailure } from "../../scripts/installer/bootstrap";
 import {
@@ -117,7 +117,7 @@ test("update is forward-only and PostgreSQL image changes require a separate rol
 
 test("backup result requires COMPLETE and verifies the exact checksum set", () => {
   const root = mkdtempSync(join(tmpdir(), "product-hub-backup-test-"));
-  const set = join(root, "product-hub-fixture");
+  const set = join(root, `product-hub-20261014T000000Z-${"a".repeat(40)}`);
   mkdirSync(set);
   try {
     const files = {
@@ -140,6 +140,20 @@ test("backup result requires COMPLETE and verifies the exact checksum set", () =
     writeFileSync(join(set, "COMPLETE"), "");
     const result = verifyBackupResult(`${set}\n`, root);
     assert.equal(result.path, set);
+    // The backup container prints its own mount path, /backups/<set>.
+    assert.equal(
+      verifyBackupResult(`/backups/${basename(set)}\n`, root).path,
+      set,
+    );
+    for (const output of [
+      "/backups/../etc\n",
+      "/backups/product-hub-x/../../etc\n",
+      "/elsewhere/product-hub-20261014T000000Z-" + "a".repeat(40) + "\n",
+    ])
+      assert.equal(
+        failure(() => verifyBackupResult(output, root)),
+        "BACKUP_PATH",
+      );
     assert.equal(readFileSync(result.complete, "utf8"), "");
     writeFileSync(join(set, "database.dump"), "tampered");
     assert.equal(

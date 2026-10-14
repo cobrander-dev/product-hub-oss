@@ -48,7 +48,7 @@ async function main() {
           .trim()
           .min(3)
           .max(30)
-          .regex(/^[a-zA-Z0-9._-]+$/),
+          .regex(/^[a-zA-Z0-9._]+$/),
         name: z.string().trim().min(1).max(100),
       })
       .parse({ username: values["--username"], name: values["--name"] });

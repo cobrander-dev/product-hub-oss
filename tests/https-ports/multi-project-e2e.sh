@@ -159,7 +159,7 @@ install_invoice() { # PORT
     IG_ADMIN_PASSWORD_FILE="$work/invoice-password" bash "$work/invoice-a/install.sh"
 }
 install_hub() { # PORT (interactive wizard driven through a PTY)
-  printf '%s' '[["域名或", "hub.ci.test"], ["管理员用户名", "ci-admin"], ["管理员显示名称", "CI Admin"], ["管理员密码", "env:HUB_PASSWORD"], ["再次输入管理员密码", "env:HUB_PASSWORD"]]' \
+  printf '%s' '[["域名或", "hub.ci.test"], ["管理员用户名", "ci_admin"], ["管理员显示名称", "CI Admin"], ["管理员密码", "env:HUB_PASSWORD"], ["再次输入管理员密码", "env:HUB_PASSWORD"]]' \
     >"$work/hub-answers.json"
   HUB_PASSWORD="$hub_password" PRODUCT_HUB_RELEASE_MANIFEST="$work/hub-v0.9.1-ci.1.manifest" PRODUCT_HUB_HTTPS_PORT="$1" \
     PRODUCT_HUB_ACME_CA="$acme_ca" PRODUCT_HUB_ACME_CA_ROOT="$work/pebble/minica.pem" \
@@ -205,7 +205,7 @@ hub_login() {
   local jar="$work/hub.jar" status
   local curl_=(curl -sS --cacert "$work/pebble-root.pem" --resolve "$hub_host:$hub_port:127.0.0.1" -b "$jar" -c "$jar")
   rm -f "$jar"
-  jq -n --arg u ci-admin --arg p "$hub_password" '{username: $u, password: $p}' >"$work/hub-login.json"
+  jq -n --arg u ci_admin --arg p "$hub_password" '{username: $u, password: $p}' >"$work/hub-login.json"
   status="$("${curl_[@]}" -o /dev/null -w '%{http_code}' -X POST "$hub_origin/api/auth/sign-in/username" \
     -H "Origin: $invoice_origin" -H 'Content-Type: application/json' --data @"$work/hub-login.json")"
   [[ "$status" == 403 ]] || fail "Product Hub accepted a sign-in from another origin ($status)"

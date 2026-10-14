@@ -13,7 +13,7 @@ const inputSchema = z
       .trim()
       .min(3)
       .max(30)
-      .regex(/^[a-zA-Z0-9._-]+$/)
+      .regex(/^[a-zA-Z0-9._]+$/)
       .transform((value) => value.toLowerCase()),
     password: z.string().min(8).max(128),
     name: z.string().trim().min(1).max(100),

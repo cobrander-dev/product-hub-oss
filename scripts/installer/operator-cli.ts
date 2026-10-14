@@ -287,7 +287,7 @@ async function setup(manifestPath: string) {
   await install(installation);
 
   process.stdout.write(
-    "\n创建管理员账号（用户名 3-30 位字母/数字/._-，密码至少 8 位）\n",
+    "\n创建管理员账号（用户名 3-30 位字母/数字/._（与登录规则一致），密码至少 8 位）\n",
   );
   const username = await question("管理员用户名: ");
   const name = await question("管理员显示名称: ");
@@ -301,7 +301,7 @@ async function setup(manifestPath: string) {
         .trim()
         .min(3)
         .max(30)
-        .regex(/^[a-zA-Z0-9._-]+$/),
+        .regex(/^[a-zA-Z0-9._]+$/),
       name: z.string().trim().min(1).max(100),
       password: z.string().min(8).max(128),
     })

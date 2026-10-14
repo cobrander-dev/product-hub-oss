@@ -28,7 +28,10 @@ jobs:
           node-version: 24.21.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm prisma:generate
+      - name: Generate the Prisma client (no database is contacted)
+        run: pnpm prisma:generate
+        env:
+          DATABASE_URL: postgresql://unused:unused@127.0.0.1:5432/unused
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck

@@ -120,7 +120,7 @@ while [ -z "$entry_mode" ] || [ "$entry_mode" = gateway ]; do
     *)
       owner=${gateway_state#unmanageable }
       [ "$preset_entry" -eq 0 ] || fail GATEWAY_UNAVAILABLE "80/443 已被 $owner 占用，无法安全接管；不会停止或修改它。"
-      tty_say "80/443 已被 $owner 占用，无法安全接管：不会停止或修改它。可改选“独立 HTTPS 端口”或“已有反向代理”。
+      tty_say "80/443 已被 $owner 占用，无法安全接管：不会停止或修改它。可改选「独立 HTTPS 端口」或「已有反向代理」。
 "
       entry_mode=''
       continue

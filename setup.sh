@@ -73,7 +73,8 @@ valid_https_port() {
   [ "$1" -eq 443 ] || { [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }
 }
 
-has_tty() { { : </dev/tty; } 2>/dev/null; }
+# Subshell: in dash a failed redirection on a special builtin would end the script.
+has_tty() { (: </dev/tty) 2>/dev/null; }
 
 # HTTPS entry: shared gateway (docs/HTTPS_GATEWAY.md), own port (docs/HTTPS_PORTS.md) or an
 # existing reverse proxy. Decided before any pull or write; nothing else is changed here.

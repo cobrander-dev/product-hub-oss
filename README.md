@@ -30,7 +30,12 @@ curl -fsSL https://github.com/cobrander-dev/product-hub-oss/releases/latest/down
 4. 自动生成数据库与认证密钥，初始化数据库并启动服务。
 5. 创建管理员账号（密码隐藏输入）。
 
-推荐配置 4 vCPU / 8 GiB 内存 / 80 GiB 磁盘。云服务器请在安全组放行 TCP 80 和所选 HTTPS 端口。再次运行同一命令会打开管理菜单，不会覆盖已有安装。安装指定版本（包括测试版）：把 `latest/download` 换成 `download/版本号`，并把 `bash install.sh` 写成 `PRODUCT_HUB_VERSION=版本号 bash install.sh`，例如 `v0.9.0-rc.1`。
+推荐配置 4 vCPU / 8 GiB 内存 / 80 GiB 磁盘。云服务器请在安全组放行 TCP 80 和所选 HTTPS 端口。再次运行同一命令会打开管理菜单，不会覆盖已有安装。安装指定版本（包括测试版）：把 `latest/download` 换成 `download/版本号`，并把 `bash install.sh` 写成 `PRODUCT_HUB_VERSION=版本号 bash install.sh`，例如 `v0.9.1`。
+
+### 版本说明
+
+- **v0.9.1 是第一个正式稳定版本**（仅支持 linux/amd64 / x86_64），与测试版 v0.9.0-rc.4 使用完全相同的镜像；已安装 rc.4 的服务器无需升级或重装。
+- GHCR 中较早存在的 `v0.9.0` 镜像标签来自旧的内部提交，**不是正式发布**，没有对应的 GitHub Release，也不包含之后的修复，请勿直接使用。请始终通过上面的安装命令或 GitHub Release 中的发布清单（按 digest 固定镜像）安装。
 
 ## HTTPS
 
